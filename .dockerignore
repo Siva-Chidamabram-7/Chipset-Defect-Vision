@@ -1,18 +1,33 @@
+# Version control
 .git
 .gitignore
+
+# Python artefacts
 __pycache__
 *.pyc
 *.pyo
 *.pyd
 *.egg-info
 .pytest_cache
+*.log
+
+# Local virtual environments
 .venv
 venv
 env
 .env
-node_modules
-*.log
+
+# ML training artefacts (large, not needed in image)
 datasets/
 runs/
 training/
+
+# OS artefacts
+.DS_Store
+Thumbs.db
+
+# Docs (not needed at runtime)
 README.md
+
+# Node (not used, but just in case)
+node_modules

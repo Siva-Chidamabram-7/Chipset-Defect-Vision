@@ -3,75 +3,84 @@ SolderDefectPredictor
 ─────────────────────
 Wraps YOLOv8 inference and annotation.
 
-Model priority:
-  1. weights/best.pt   ← fine-tuned on PCB solder dataset
-  2. weights/yolov8n.pt ← downloaded automatically if neither exists
+Model priority (checked in order):
+  1. weights/best.pt        ← fine-tuned on PCB solder dataset (user-supplied)
+  2. weights/yolov8n.pt     ← baked into Docker image at build time
+  3. YOLO("yolov8n.pt")     ← ultralytics auto-download (last resort)
 
 Class mapping (fine-tuned model):
   0 → good
   1 → defect
 
-When running on the base COCO model (no fine-tuned weights), we map
-all detections to a demo label so the UI still works end-to-end.
+When running on the base COCO model (no fine-tuned weights), detections are
+re-mapped to demo labels so the UI still works end-to-end.
 """
 
 import base64
-import os
 from pathlib import Path
 from typing import Any
 
 import cv2
 import numpy as np
 
-# Lazy import – lets the container start even before torch is fully cached
+# Lazy import — lets the container start even if torch isn't fully loaded yet.
 try:
     from ultralytics import YOLO
     _YOLO_AVAILABLE = True
 except ImportError:
     _YOLO_AVAILABLE = False
 
-# ── Constants ─────────────────────────────────────────────────────────────────
-WEIGHTS_DIR = Path(__file__).parent.parent.parent / "weights"
+# ── Constants ──────────────────────────────────────────────────────────────────
+WEIGHTS_DIR  = Path(__file__).parent.parent.parent / "weights"
 FINE_TUNED   = WEIGHTS_DIR / "best.pt"
-BASE_MODEL   = WEIGHTS_DIR / "yolov8n.pt"
+BASE_WEIGHTS = WEIGHTS_DIR / "yolov8n.pt"   # pre-downloaded at Docker build time
 
-CLASS_NAMES  = {0: "good", 1: "defect"}
-COLORS       = {
-    "good":   (34, 197, 94),   # green
-    "defect": (239, 68, 68),   # red
-    "unknown":(234, 179, 8),   # yellow fallback
+CLASS_NAMES = {0: "good", 1: "defect"}
+COLORS = {
+    "good":    (34, 197, 94),   # green
+    "defect":  (239, 68, 68),   # red
+    "unknown": (234, 179, 8),   # yellow fallback
 }
 CONF_THRESHOLD = 0.25
 
 
-# ── Predictor ─────────────────────────────────────────────────────────────────
+# ── Predictor ──────────────────────────────────────────────────────────────────
 class SolderDefectPredictor:
     def __init__(self):
-        self._model = None
+        self._model      = None
         self._fine_tuned = False
         self._load_model()
 
-    # ── Model loading ─────────────────────────────────────────────────────────
+    # ── Model loading ──────────────────────────────────────────────────────────
     def _load_model(self):
         if not _YOLO_AVAILABLE:
-            print("[Predictor] ultralytics not available – running in stub mode.")
+            print("[Predictor] ultralytics not available — running in stub mode.")
             return
 
         WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
 
         if FINE_TUNED.exists():
+            # Priority 1 — user's fine-tuned model
             print(f"[Predictor] Loading fine-tuned weights: {FINE_TUNED}")
-            self._model = YOLO(str(FINE_TUNED))
+            self._model      = YOLO(str(FINE_TUNED))
             self._fine_tuned = True
+
+        elif BASE_WEIGHTS.exists():
+            # Priority 2 — base YOLOv8n baked into the Docker image
+            print(f"[Predictor] Loading base weights (baked): {BASE_WEIGHTS}")
+            self._model      = YOLO(str(BASE_WEIGHTS))
+            self._fine_tuned = False
+
         else:
-            print(f"[Predictor] Fine-tuned weights not found. Loading base YOLOv8n.")
-            self._model = YOLO("yolov8n.pt")           # auto-downloads
+            # Priority 3 — last-resort auto-download (requires internet)
+            print("[Predictor] weights/yolov8n.pt not found — attempting auto-download.")
+            self._model      = YOLO("yolov8n.pt")
             self._fine_tuned = False
 
     def is_ready(self) -> bool:
         return self._model is not None or not _YOLO_AVAILABLE
 
-    # ── Inference ─────────────────────────────────────────────────────────────
+    # ── Inference ──────────────────────────────────────────────────────────────
     def predict(self, image_path: str) -> dict[str, Any]:
         img_bgr = cv2.imread(image_path)
         if img_bgr is None:
@@ -93,13 +102,13 @@ class SolderDefectPredictor:
         if results.boxes is not None:
             for box in results.boxes:
                 x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-                conf  = float(box.conf[0])
-                cls   = int(box.cls[0])
+                conf = float(box.conf[0])
+                cls  = int(box.cls[0])
 
                 if self._fine_tuned:
                     label = CLASS_NAMES.get(cls, "unknown")
                 else:
-                    # Base COCO model: map all high-conf detections to demo labels
+                    # Base COCO model: map detections to demo labels for UI demo
                     label = "defect" if conf < 0.6 else "good"
 
                 color = COLORS.get(label, COLORS["unknown"])
@@ -111,28 +120,25 @@ class SolderDefectPredictor:
                     "bbox":       [x1, y1, x2, y2],
                 })
 
-        annotated_b64 = self._encode_image(annotated)
         return {
             "detections":   detections,
             "total":        len(detections),
             "defect_count": sum(1 for d in detections if d["label"] == "defect"),
             "good_count":   sum(1 for d in detections if d["label"] == "good"),
-            "image":        annotated_b64,
+            "image":        self._encode_image(annotated),
             "model":        "fine-tuned" if self._fine_tuned else "base-yolov8n",
         }
 
-    # ── Helpers ───────────────────────────────────────────────────────────────
+    # ── Helpers ────────────────────────────────────────────────────────────────
     @staticmethod
     def _draw_box(img, x1, y1, x2, y2, label, conf, color):
-        thickness = 2
-        cv2.rectangle(img, (x1, y1), (x2, y2), color, thickness)
+        cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
 
         text  = f"{label} {conf:.2f}"
         font  = cv2.FONT_HERSHEY_SIMPLEX
         scale = 0.55
         (tw, th), baseline = cv2.getTextSize(text, font, scale, 1)
 
-        # label background pill
         pad = 4
         cv2.rectangle(
             img,
@@ -153,10 +159,9 @@ class SolderDefectPredictor:
 
     def _stub_response(self, img: np.ndarray) -> dict:
         """Fallback when ultralytics is not installed (CI / lightweight env)."""
-        h, w = img.shape[:2]
-        stub_img = img.copy()
+        stub = img.copy()
         cv2.putText(
-            stub_img, "Model not loaded – stub mode",
+            stub, "Model not loaded — stub mode",
             (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2,
         )
         return {
@@ -164,6 +169,6 @@ class SolderDefectPredictor:
             "total":        0,
             "defect_count": 0,
             "good_count":   0,
-            "image":        self._encode_image(stub_img),
+            "image":        self._encode_image(stub),
             "model":        "stub",
         }

@@ -1,5 +1,4 @@
 import os
-import uuid
 import base64
 import tempfile
 from pathlib import Path

@@ -3,19 +3,20 @@ fastapi==0.111.0
 uvicorn[standard]==0.29.0
 python-multipart==0.0.9
 
-# ── Computer Vision ───────────────────────────────────────────────────────────
-ultralytics==8.2.18        # YOLOv8
-opencv-python-headless==4.9.0.80
-Pillow==10.3.0
-numpy==1.26.4
+# ── Machine Learning ──────────────────────────────────────────────────────────
+# torch + torchvision are intentionally NOT listed here.
+# They are installed from the official CPU-only wheel in the Dockerfile to avoid
+# pulling the 2 GB GPU bundle from PyPI.
+# For local dev:  pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+ultralytics==8.2.18
 
-# ── PyTorch (CPU wheel — swap for GPU in Dockerfile if needed) ────────────────
-# Installed automatically by ultralytics; pin here for reproducibility.
-# torch>=2.0.0            # uncomment to force a specific torch build
-# torchvision>=0.15.0
+# ── Computer Vision ───────────────────────────────────────────────────────────
+# opencv-python-headless replaces opencv-python (no libGL dependency).
+# The Dockerfile installs this AFTER ultralytics to prevent dual-cv2 conflict.
+# Do NOT pin opencv here — let the Dockerfile control the swap.
+numpy==1.26.4
+Pillow==10.3.0
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 pydantic==2.7.1
 PyYAML==6.0.1
-requests==2.31.0
-tqdm==4.66.2
