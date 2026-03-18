@@ -39,6 +39,18 @@ weights/best.pt
 weights/last.pt
 weights/yolov8n.pt
 
+# ── SAM model weights ─────────────────────────────────────────────────────────
+# SAM checkpoints are large (~375 MB – 2.4 GB); manage outside git.
+# Transfer to weights/ manually for offline use.
+weights/sam_vit_b.pth
+weights/sam_vit_l.pth
+weights/sam_vit_h.pth
+
+# ── SAM intermediate outputs ──────────────────────────────────────────────────
+# Region JSON files (output of generate_regions.py) are machine-local artefacts.
+# Ignore the content but keep the directory scaffold via .gitkeep.
+raw_data/regions/**/*.json
+
 # ── Training artefacts ────────────────────────────────────────────────────────
 runs/
 datasets/

@@ -1,0 +1,48 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# requirements-sam.txt — Dataset creation environment (Phase 1 + 2)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# These packages are ONLY needed for:
+#   • scripts/generate_regions.py  (SAM automatic region detection)
+#   • scripts/annotate.py          (interactive OpenCV labeling tool)
+#
+# They are NOT part of the inference Docker image (Dockerfile).
+# The inference image uses requirements.txt instead.
+#
+# ── Install (run from project root) ──────────────────────────────────────────
+#
+# 1. Create a separate virtualenv for dataset work:
+#      python -m venv .venv-sam
+#      .venv-sam\Scripts\activate   # Windows
+#      source .venv-sam/bin/activate # macOS / Linux
+#
+# 2. Install CPU-only torch first (must be before segment-anything):
+#      pip install torch==2.3.0 torchvision==0.18.0 \
+#          --index-url https://download.pytorch.org/whl/cpu
+#
+#    Offline (after downloading the wheels on a connected machine):
+#      pip install torch-2.3.0+cpu-cp310-*.whl torchvision-0.18.0+cpu-cp310-*.whl \
+#          --no-index
+#
+# 3. Install this file:
+#      pip install -r requirements-sam.txt
+#
+# ── Offline note ──────────────────────────────────────────────────────────────
+# SAM checkpoint (~375 MB for vit_b) must be downloaded on a connected machine:
+#   wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth \
+#        -O weights/sam_vit_b.pth
+# Then transfer weights/sam_vit_b.pth to your offline workstation.
+#
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── SAM — Segment Anything Model (Meta AI) ────────────────────────────────────
+segment-anything==1.0
+
+# ── Computer Vision ───────────────────────────────────────────────────────────
+# Use full opencv-python (not headless) — annotate.py requires cv2.imshow()
+opencv-python==4.9.0.80
+numpy==1.26.4
+Pillow==10.3.0
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+PyYAML==6.0.1
