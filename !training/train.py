@@ -84,7 +84,8 @@ def check_dataset(data_yaml: str) -> Path:
     if not yaml_path.exists():
         print(
             f"[Train] ERROR: Dataset YAML not found: {yaml_path}\n"
-            f"        Run training/prepare_dataset.py first.",
+            f"        Export your dataset from Roboflow in YOLOv8 format,\n"
+            f"        place images/labels under data/, then re-run.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -114,8 +115,8 @@ def check_dataset(data_yaml: str) -> Path:
             "[Train] ERROR: Dataset is not ready.\n"
             + "\n".join(errors) + "\n"
             "        Steps to fix:\n"
-            "          1. Label images with LabelImg (see README § Dataset Preparation)\n"
-            "          2. Run: python training/prepare_dataset.py --src raw_data --dst data",
+            "          1. Export your dataset from Roboflow in YOLOv8 format.\n"
+            "          2. Place the split directories under data/images/ and data/labels/.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -139,7 +140,7 @@ def parse_args():
     )
     p.add_argument(
         "--data",
-        default="training/data.yaml",
+        default="!training/data.yaml",
         help="Path to dataset YAML (relative to project root or absolute).",
     )
     p.add_argument("--epochs",   type=int,   default=50)

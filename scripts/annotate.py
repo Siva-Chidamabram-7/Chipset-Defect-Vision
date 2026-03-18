@@ -21,9 +21,10 @@ Keyboard controls
 ─────────────────
     G  →  label as "good"   (class 0)
     D  →  label as "defect" (class 1)
-    S  →  skip this region  (not saved to label file)
+    X  →  skip this region  (not saved to label file)
     B  →  undo last label in current image
-    Q  →  save current image and quit
+    N  →  save current image labels and advance to the next image immediately
+    Q  →  save current image and quit the entire session
     Esc→  same as Q
 
 After labeling all regions in an image the labels are saved automatically
@@ -72,7 +73,8 @@ COLOR_TEXT    = (255, 255, 255)   # white text
 # Key map
 KEY_GOOD   = ord('g')
 KEY_DEFECT = ord('d')
-KEY_SKIP   = ord('s')
+KEY_SKIP   = ord('x')
+KEY_NEXT   = ord('n')
 KEY_BACK   = ord('b')
 KEY_QUIT   = ord('q')
 KEY_ESC    = 27
@@ -216,7 +218,7 @@ def draw_legend(width: int) -> np.ndarray:
     bar = np.zeros((60, width, 3), dtype=np.uint8)
     bar[:] = (20, 20, 20)
     lines = [
-        "  G = good   D = defect   S = skip",
+        "  G = good   D = defect   X = skip   N = next image",
         "  B = undo   Q / Esc = save & quit",
     ]
     for i, line in enumerate(lines):
@@ -293,6 +295,7 @@ def annotate_image(img_path: Path, regions: list[dict],
     cv2.resizeWindow("Current Region", 320, 320)
 
     quit_requested = False
+    next_requested = False
 
     while current < len(regions):
         # ── Render overview ───────────────────────────────────────────────────
@@ -325,6 +328,9 @@ def annotate_image(img_path: Path, regions: list[dict],
             labeled[current] = {"label": -1, "bbox_yolo": regions[current]["bbox_yolo"]}
             print(f"    [{current+1:3d}/{len(regions)}] skipped")
             current += 1
+        elif key == KEY_NEXT:
+            next_requested = True
+            break
         elif key == KEY_BACK:
             if current > 0:
                 current -= 1
@@ -339,7 +345,12 @@ def annotate_image(img_path: Path, regions: list[dict],
     n_def   = sum(1 for e in labeled if e and e["label"] == 1)
     n_skip  = sum(1 for e in labeled if e and e["label"] == -1)
 
-    status = "quit" if quit_requested else "done"
+    if quit_requested:
+        status = "quit"
+    elif next_requested:
+        status = "next"
+    else:
+        status = "done"
     print(f"  → Saved {n_saved} labels  (good={n_good}, defect={n_def}, skip={n_skip})")
 
     return {
@@ -400,7 +411,7 @@ def main() -> None:
 
     print(f"[Annotator] Found {len(json_files)} region file(s) in {regions_dir}")
     print(f"[Annotator] Labels → {output_dir}\n")
-    print("  Keys:  G=good  D=defect  S=skip  B=undo  Q/Esc=quit\n")
+    print("  Keys:  G=good  D=defect  X=skip  B=undo  N=next  Q/Esc=quit\n")
 
     # ── Annotate each image ────────────────────────────────────────────────────
     total_labeled = 0
@@ -443,6 +454,9 @@ def main() -> None:
         if summary["status"] == "quit":
             print("\n[Annotator] Session saved.  Resume by running annotate.py again.")
             break
+        if summary["status"] == "next":
+            print(f"  → Skipped to next image.")
+            continue
 
     # ── Final summary ─────────────────────────────────────────────────────────
     done    = sum(1 for jf in json_files

@@ -1,9 +1,22 @@
-# Version control
+# ─────────────────────────────────────────────────────────────────────────────
+# .dockerignore — Inference image build context filter
+#
+# Rule: only include what the RUNNING CONTAINER needs.
+#   Included → app/  frontend/  weights/  requirements.txt
+#   Excluded → everything else (training code, datasets, dev tools, OS noise)
+#
+# Keeping the build context small speeds up `docker build` and prevents
+# accidental inclusion of large dataset files or secrets.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Version control ───────────────────────────────────────────────────────────
 .git
 .gitignore
+.gitattributes
 
-# Python artefacts
+# ── Python artefacts ──────────────────────────────────────────────────────────
 __pycache__
+**/__pycache__
 *.pyc
 *.pyo
 *.pyd
@@ -11,23 +24,42 @@ __pycache__
 .pytest_cache
 *.log
 
-# Local virtual environments
+# ── Local virtual environments & secrets ──────────────────────────────────────
 .venv
 venv
 env
 .env
+*.env
 
-# ML training artefacts (large, not needed in image)
-datasets/
-runs/
+# ── ML training code (local only — never runs inside the container) ───────────
 training/
 
-# OS artefacts
+# ── Dataset-creation scripts (SAM + annotation tools — GUI + heavy deps) ──────
+scripts/
+
+# ── Dataset directories (can be gigabytes — not needed for inference) ─────────
+data/
+raw_data/
+datasets/
+runs/
+
+# ── SAM / dev-only Python dependencies ────────────────────────────────────────
+requirements-sam.txt
+
+# ── Documentation ─────────────────────────────────────────────────────────────
+README.md
+CHANGELOG.md
+docs/
+
+# ── OS artefacts ──────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 
-# Docs (not needed at runtime)
-README.md
+# ── IDE / editor config ───────────────────────────────────────────────────────
+.vscode
+.idea
+*.sublime-project
+*.sublime-workspace
 
-# Node (not used, but just in case)
+# ── Node (not used — safety net) ──────────────────────────────────────────────
 node_modules

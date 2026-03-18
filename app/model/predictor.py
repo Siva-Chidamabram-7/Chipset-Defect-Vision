@@ -1,25 +1,29 @@
 """
 SolderDefectPredictor
 ─────────────────────
-Wraps YOLOv8 inference and annotation.
+Wraps YOLOv8 inference for PCB solder defect detection.
 
 ⚠  OFFLINE-FIRST: this module NEVER attempts a network call.
    All weights must be present on disk before the server starts.
 
 Model priority (checked in order):
-  1. weights/best.pt    ← fine-tuned on PCB solder dataset (user-supplied)
+  1. weights/best.pt    ← fine-tuned on the 6-class PCB defect dataset
   2. weights/yolov8n.pt ← base weights baked into the Docker image at build time
 
 If neither file exists the predictor enters STUB mode: the server still starts
 and every prediction returns an annotated image with a visible warning overlay.
-This makes misconfiguration obvious without crashing the service.
 
-Class mapping (fine-tuned model):
-  0 → good
-  1 → defect
+Defect classes (from Roboflow dataset):
+  0 → Missing_hole
+  1 → Mouse_bite
+  2 → Open_circuit
+  3 → Short
+  4 → Spur
+  5 → Spurious_copper
 
-When running on the base model (no fine-tuned weights) COCO class IDs are
-remapped to demo labels so the UI still works end-to-end.
+Decision logic:
+  • No detections above CONF_THRESHOLD → status = "GOOD"
+  • Any detection above CONF_THRESHOLD → status = "DEFECT"
 """
 
 import base64
@@ -44,14 +48,30 @@ WEIGHTS_DIR  = Path(__file__).parent.parent.parent / "weights"
 FINE_TUNED   = WEIGHTS_DIR / "best.pt"      # priority 1
 BASE_WEIGHTS = WEIGHTS_DIR / "yolov8n.pt"   # priority 2 — baked in at build time
 
-# ── Class config ─────────────────────────────────────────────────────────────
-CLASS_NAMES = {0: "good", 1: "defect"}
-COLORS = {
-    "good":    (34, 197, 94),    # green
-    "defect":  (239, 68, 68),    # red
-    "unknown": (234, 179, 8),    # yellow — used for base-model COCO classes
+# ── Class config ──────────────────────────────────────────────────────────────
+# Matches the 6-class Roboflow dataset used for fine-tuning.
+CLASS_NAMES = {
+    0: "Missing_hole",
+    1: "Mouse_bite",
+    2: "Open_circuit",
+    3: "Short",
+    4: "Spur",
+    5: "Spurious_copper",
 }
-CONF_THRESHOLD = 0.25
+
+# BGR colors — one distinct color per defect class
+COLORS = {
+    "Missing_hole":    ( 68,  68, 239),   # red
+    "Mouse_bite":      (  8, 179, 234),   # yellow
+    "Open_circuit":    (246, 130,  59),   # blue
+    "Short":           (247,  85, 168),   # purple
+    "Spur":            ( 22, 115, 249),   # orange
+    "Spurious_copper": (166, 184,  20),   # teal
+    "unknown":         (120, 120, 120),   # grey — base-model fallback
+}
+
+# Detections below this confidence are ignored entirely.
+CONF_THRESHOLD = 0.30
 
 
 # ── Predictor ─────────────────────────────────────────────────────────────────
@@ -79,7 +99,7 @@ class SolderDefectPredictor:
         WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
 
         if FINE_TUNED.exists():
-            # ── Priority 1: user-trained fine-tuned model ─────────────────────
+            # ── Priority 1: fine-tuned 6-class PCB defect model ───────────────
             print(f"[Predictor] Loading fine-tuned weights: {FINE_TUNED}")
             self._model      = YOLO(str(FINE_TUNED))
             self._fine_tuned = True
@@ -87,6 +107,12 @@ class SolderDefectPredictor:
         elif BASE_WEIGHTS.exists():
             # ── Priority 2: base YOLOv8n baked into the Docker image ──────────
             print(f"[Predictor] Loading base weights: {BASE_WEIGHTS}")
+            print(
+                "[Predictor] WARNING: Running on base COCO model — class names\n"
+                "            will not match PCB defect classes until best.pt is\n"
+                "            provided.  All detections will be labelled 'unknown'.",
+                file=sys.stderr,
+            )
             self._model      = YOLO(str(BASE_WEIGHTS))
             self._fine_tuned = False
 
@@ -112,6 +138,21 @@ class SolderDefectPredictor:
 
     # ── Inference ─────────────────────────────────────────────────────────────
     def predict(self, image_path: str) -> dict[str, Any]:
+        """
+        Run YOLOv8 inference and return a structured result.
+
+        Response schema:
+          {
+            "status":     "GOOD" | "DEFECT",
+            "detections": [{"class": str, "confidence": float, "bbox": [x1,y1,x2,y2]}],
+            "image":      <base64-encoded annotated JPEG>,
+            "model":      "fine-tuned" | "base-yolov8n" | "stub — no weights found"
+          }
+
+        Decision rule:
+          • No detections → "GOOD"
+          • Any detection  → "DEFECT"
+        """
         img_bgr = cv2.imread(image_path)
         if img_bgr is None:
             raise ValueError(f"Cannot read image: {image_path}")
@@ -135,27 +176,30 @@ class SolderDefectPredictor:
                 conf = float(box.conf[0])
                 cls  = int(box.cls[0])
 
+                # Use class names from the fine-tuned model's own metadata when
+                # available; fall back to our CLASS_NAMES dict; "unknown" for the
+                # base COCO model (class IDs do not map to PCB defect classes).
                 if self._fine_tuned:
-                    label = CLASS_NAMES.get(cls, "unknown")
+                    class_name = CLASS_NAMES.get(cls, "unknown")
                 else:
-                    # Base COCO model: remap all detections to demo labels
-                    label = "defect" if conf < 0.6 else "good"
+                    class_name = "unknown"
 
-                color = COLORS.get(label, COLORS["unknown"])
-                self._draw_box(annotated, x1, y1, x2, y2, label, conf, color)
+                color = COLORS.get(class_name, COLORS["unknown"])
+                self._draw_box(annotated, x1, y1, x2, y2, class_name, conf, color)
                 detections.append({
-                    "label":      label,
+                    "class":      class_name,
                     "confidence": round(conf, 4),
                     "bbox":       [x1, y1, x2, y2],
                 })
 
+        # ── Binary decision ───────────────────────────────────────────────────
+        status = "GOOD" if not detections else "DEFECT"
+
         return {
-            "detections":   detections,
-            "total":        len(detections),
-            "defect_count": sum(1 for d in detections if d["label"] == "defect"),
-            "good_count":   sum(1 for d in detections if d["label"] == "good"),
-            "image":        self._encode_image(annotated),
-            "model":        "fine-tuned" if self._fine_tuned else "base-yolov8n",
+            "status":     status,
+            "detections": detections,
+            "image":      self._encode_image(annotated),
+            "model":      "fine-tuned" if self._fine_tuned else "base-yolov8n",
         }
 
     # ── Helpers ───────────────────────────────────────────────────────────────
@@ -192,8 +236,7 @@ class SolderDefectPredictor:
         Overlays a visible warning on the image so the problem is unmissable
         in the UI — much better than a silent empty-detections response.
         """
-        stub = img.copy()
-        # Dark semi-transparent banner
+        stub    = img.copy()
         overlay = stub.copy()
         cv2.rectangle(overlay, (0, 0), (stub.shape[1], 60), (30, 30, 30), -1)
         cv2.addWeighted(overlay, 0.6, stub, 0.4, 0, stub)
@@ -202,10 +245,8 @@ class SolderDefectPredictor:
             (10, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 80, 255), 2, cv2.LINE_AA,
         )
         return {
-            "detections":   [],
-            "total":        0,
-            "defect_count": 0,
-            "good_count":   0,
-            "image":        self._encode_image(stub),
-            "model":        "stub — no weights found",
+            "status":     "GOOD",   # no model → no detections → neutral status
+            "detections": [],
+            "image":      self._encode_image(stub),
+            "model":      "stub — no weights found",
         }

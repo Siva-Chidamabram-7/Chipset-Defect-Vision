@@ -119,13 +119,17 @@ sys.exit(0 if p.exists() else 1); \
     && echo "[Docker] ✓ Base weights verified at /app/weights/yolov8n.pt"
 
 # ── Layer 6: Application code ─────────────────────────────────────────────────
+# Inference container only.  Intentionally omitted:
+#   training/  — YOLO fine-tuning scripts; run locally, not in the container.
+#   scripts/   — SAM dataset-creation tools; require a GUI + heavy deps.
+#   data/      — training images/labels; excluded by .dockerignore.
+#   raw_data/  — pre-split source images; excluded by .dockerignore.
 COPY app/      app/
 COPY frontend/ frontend/
-COPY scripts/  scripts/
-COPY training/ training/
-# User-provided training weights (best.pt) are copied last.
-# The pre-downloaded yolov8n.pt from Layer 5 is NOT overwritten unless the
-# local weights/ directory also contains a yolov8n.pt.
+# User-provided fine-tuned weights (best.pt) are copied in here if they exist
+# locally in weights/.  The yolov8n.pt baked in Layer 5 is preserved because
+# the local weights/ directory never contains a tracked yolov8n.pt (it is in
+# .gitignore) — so Layer 5's copy is never overwritten.
 COPY weights/  weights/
 
 # ── Layer 7: Runtime user & permissions ───────────────────────────────────────

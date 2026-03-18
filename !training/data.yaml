@@ -1,16 +1,17 @@
 # ══════════════════════════════════════════════════════════════════════════════
-# PCB Solder Defect — Dataset Configuration (offline / local)
+# PCB Defect Detection — Dataset Configuration
 # ══════════════════════════════════════════════════════════════════════════════
 #
-# This file is the single source of truth for dataset paths used during
-# training.  All paths are LOCAL — no Roboflow, no internet.
+# Dataset source: Roboflow export in YOLOv8 format
+#   Export your dataset from Roboflow as "YOLOv8" and place the split
+#   directories under data/ so the layout matches below.
 #
 # Expected directory layout (relative to project root):
 #
 #   data/
 #   ├── images/
-#   │   ├── train/   ← .jpg / .png training images
-#   │   └── val/     ← .jpg / .png validation images
+#   │   ├── train/   ← training images (.jpg / .png)
+#   │   └── val/     ← validation images
 #   └── labels/
 #       ├── train/   ← YOLO-format .txt annotations
 #       └── val/
@@ -18,26 +19,22 @@
 # Label format per line:
 #   <class_id> <x_center> <y_center> <width> <height>   (all values 0–1)
 #
-# Classes:
-#   0 → good    (solder joint with no visible defect)
-#   1 → defect  (cold joint, bridge, void, insufficient solder, etc.)
-#
-# To create / populate data/ run:
-#   python training/prepare_dataset.py --src raw_data --dst data
-#
-# ── Path resolution ────────────────────────────────────────────────────────────
+# ── Path resolution ───────────────────────────────────────────────────────────
 # `path` is resolved relative to THIS yaml file's location.
-# data.yaml lives in  training/
+# data.yaml lives in  !training/
 # ../data          resolves to  <project_root>/data/
 # ══════════════════════════════════════════════════════════════════════════════
 
-path: ../data          # dataset root — relative to training/data.yaml
+path: ../data          # dataset root — relative to !training/data.yaml
 
 train: images/train    # → <project_root>/data/images/train
 val:   images/val      # → <project_root>/data/images/val
-# test: images/test    # uncomment if you create a held-out test split
 
-nc: 2
+nc: 6
 names:
-  0: good
-  1: defect
+  0: Missing_hole
+  1: Mouse_bite
+  2: Open_circuit
+  3: Short
+  4: Spur
+  5: Spurious_copper
