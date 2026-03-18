@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+.env
+*.log
+runs/
+datasets/
+weights/best.pt
+weights/last.pt
+.DS_Store
+Thumbs.db

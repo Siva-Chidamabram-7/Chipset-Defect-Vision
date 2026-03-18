@@ -1,0 +1,27 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# PCB Solder Defect Dataset Configuration
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# Directory layout expected:
+#   datasets/pcb_solder/
+#     images/
+#       train/   ← training images (.jpg / .png)
+#       val/     ← validation images
+#       test/    ← (optional) test images
+#     labels/
+#       train/   ← YOLO-format .txt labels
+#       val/
+#       test/
+#
+# Label format per line:  <class_id> <cx> <cy> <w> <h>   (all normalised 0-1)
+# ──────────────────────────────────────────────────────────────────────────────
+
+path: datasets/pcb_solder        # root (relative to repo root, or absolute)
+train: images/train
+val:   images/val
+test:  images/test               # optional
+
+nc: 2                            # number of classes
+names:
+  0: good
+  1: defect
