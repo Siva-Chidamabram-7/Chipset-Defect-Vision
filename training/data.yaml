@@ -1,0 +1,43 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# PCB Solder Defect — Dataset Configuration (offline / local)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# This file is the single source of truth for dataset paths used during
+# training.  All paths are LOCAL — no Roboflow, no internet.
+#
+# Expected directory layout (relative to project root):
+#
+#   data/
+#   ├── images/
+#   │   ├── train/   ← .jpg / .png training images
+#   │   └── val/     ← .jpg / .png validation images
+#   └── labels/
+#       ├── train/   ← YOLO-format .txt annotations
+#       └── val/
+#
+# Label format per line:
+#   <class_id> <x_center> <y_center> <width> <height>   (all values 0–1)
+#
+# Classes:
+#   0 → good    (solder joint with no visible defect)
+#   1 → defect  (cold joint, bridge, void, insufficient solder, etc.)
+#
+# To create / populate data/ run:
+#   python training/prepare_dataset.py --src raw_data --dst data
+#
+# ── Path resolution ────────────────────────────────────────────────────────────
+# `path` is resolved relative to THIS yaml file's location.
+# data.yaml lives in  training/
+# ../data          resolves to  <project_root>/data/
+# ══════════════════════════════════════════════════════════════════════════════
+
+path: ../data          # dataset root — relative to training/data.yaml
+
+train: images/train    # → <project_root>/data/images/train
+val:   images/val      # → <project_root>/data/images/val
+# test: images/test    # uncomment if you create a held-out test split
+
+nc: 2
+names:
+  0: good
+  1: defect

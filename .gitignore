@@ -1,14 +1,48 @@
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+*.log
+
+# ── Virtual environments ──────────────────────────────────────────────────────
 .venv/
 venv/
 env/
 .env
-*.log
-runs/
-datasets/
+
+# ── Dataset files ─────────────────────────────────────────────────────────────
+# Ignore actual image and label files (large, machine-local).
+# We ignore by EXTENSION, not by directory, so that .gitkeep placeholder files
+# inside data/ and raw_data/ are still tracked — preserving the folder structure
+# in git without committing any dataset content.
+data/images/**/*.jpg
+data/images/**/*.jpeg
+data/images/**/*.png
+data/images/**/*.bmp
+data/images/**/*.webp
+data/labels/**/*.txt
+raw_data/images/**/*.jpg
+raw_data/images/**/*.jpeg
+raw_data/images/**/*.png
+raw_data/images/**/*.bmp
+raw_data/images/**/*.webp
+raw_data/labels/**/*.txt
+
+# ── Model weights ─────────────────────────────────────────────────────────────
+# Trained weights are large binaries — manage outside git.
+# For factory deployments, transfer them via USB or shared network drive.
+# yolov8n.pt is baked into the Docker image at build time; no need to commit it.
 weights/best.pt
 weights/last.pt
+weights/yolov8n.pt
+
+# ── Training artefacts ────────────────────────────────────────────────────────
+runs/
+datasets/
+
+# ── OS artefacts ──────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
