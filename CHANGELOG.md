@@ -4,6 +4,136 @@ All significant changes to the project, in reverse-chronological order.
 
 ---
 
+## [Session 8] — 2026-03-18  SAM + YOLO Bootstrap Pipeline (Zero Manual Annotation)
+
+### Overview
+Implemented a fully automated training pipeline that requires zero manual
+annotation.  SAM generates initial bounding-box labels from a class-labelled
+folder structure.  YOLO trains on those labels.  YOLO then re-labels the
+dataset with higher-quality predictions.  Re-training on the improved labels
+closes the loop.
+
+```
+dataset/<ClassName>/    →  sam_auto_annotate  →  data/  →  train.py
+                                                              ↓
+                                                          best.pt
+                                                              ↓
+                                                    auto_label_with_yolo
+                                                              ↓
+                                                      improved data/  →  train.py
+```
+
+---
+
+### `scripts/sam_auto_annotate.py` — new (Step 1)
+
+**Purpose:** Convert a class-labelled folder dataset into YOLO-format train/val
+splits using SAM for bounding-box generation.
+
+**Input:**
+```
+dataset/
+├── Missing_hole/
+├── Mouse_bite/
+├── Open_circuit/
+├── Short/
+├── Spur/
+└── Spurious_copper/
+```
+
+**Output:**
+```
+data/
+├── images/train/ + images/val/
+└── labels/train/ + labels/val/
+```
+
+**Key design decisions:**
+
+| Feature | Detail |
+|---------|--------|
+| Model type detection | Inferred from checkpoint filename (`vit_b` / `vit_l` / `vit_h`) |
+| Per-class train/val split | 80/20 per class (default) for balanced representation |
+| 5-stage mask filter | area → relative area → aspect ratio → border proximity → stability score |
+| Greedy IoU-NMS | Removes duplicate overlapping SAM regions (threshold 0.50) |
+| Fallback box | `0.5 0.5 1.0 1.0` (full image) when SAM finds no valid region — ensures every image has at least one label |
+| `--overwrite` flag | Skip already-annotated images by default; `--overwrite` to redo |
+| `--device` flag | Supports cpu / cuda / mps for SAM inference |
+
+**Filtering constants:**
+| Parameter | Default | Meaning |
+|-----------|---------|---------|
+| `min_area` | 500 px² | Minimum mask area |
+| `max_area_ratio` | 0.60 | Maximum fraction of image area |
+| min aspect ratio | 0.10 | Minimum w/h |
+| max aspect ratio | 10.0 | Maximum w/h |
+| border margin | 3 px | Edge exclusion zone |
+| min stability | 0.75 | SAM stability score floor |
+| NMS IoU threshold | 0.50 | Duplicate suppression |
+
+**CLI:**
+```bash
+python scripts/sam_auto_annotate.py
+python scripts/sam_auto_annotate.py --input dataset/ --output data/
+python scripts/sam_auto_annotate.py --sam-weights weights/sam_vit_b.pth --device cuda
+python scripts/sam_auto_annotate.py --val-split 0.2 --overwrite
+```
+
+---
+
+### `scripts/auto_label_with_yolo.py` — new (Step 3)
+
+**Purpose:** Replace SAM-generated labels with higher-quality YOLO predictions
+after an initial training round.
+
+**Behaviour:**
+- Scans `data/images/train/` and `data/images/val/` for all images
+- Runs YOLO inference with `--conf` threshold (default 0.30)
+- Converts `xyxy` detections → normalised YOLO `cx cy w h`
+- Writes new `.txt` labels to `data/labels/<split>/`, overwriting SAM labels
+- `--keep-undetected`: preserve existing label when YOLO finds nothing
+  (useful in early training iterations when the model is immature)
+
+**CLI:**
+```bash
+python scripts/auto_label_with_yolo.py
+python scripts/auto_label_with_yolo.py --weights weights/best.pt --conf 0.3
+python scripts/auto_label_with_yolo.py --keep-undetected
+```
+
+---
+
+### `requirements-sam.txt` — header updated
+Comment updated: `scripts/generate_regions.py` → `scripts/sam_auto_annotate.py`
+(generate_regions.py is deprecated; sam_auto_annotate.py is the active SAM script).
+
+---
+
+### Full bootstrap usage
+
+```bash
+# ── Install dependencies ──────────────────────────────────────────────────────
+pip install torch==2.3.0 torchvision==0.18.0 --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements-sam.txt      # adds segment-anything
+
+# ── Step 1: SAM auto-annotation ───────────────────────────────────────────────
+# Requires: dataset/<ClassName>/ layout + weights/sam_vit_h.pth (or vit_b/vit_l)
+python scripts/sam_auto_annotate.py --input dataset/ --output data/
+
+# ── Step 2: Initial YOLO training ─────────────────────────────────────────────
+python !training/train.py --data !training/data.yaml --epochs 50
+
+# ── Step 3: YOLO re-labelling ─────────────────────────────────────────────────
+python scripts/auto_label_with_yolo.py --weights weights/best.pt --conf 0.3
+
+# ── Step 4: Retrain on improved labels ────────────────────────────────────────
+python !training/train.py --data !training/data.yaml --epochs 50
+
+# ── Step 5: Repeat Steps 3–4 as desired ──────────────────────────────────────
+```
+
+---
+
 ## [Session 7] — 2026-03-18  6-Class Refactor + SAM Removal + Image Persistence
 
 ### Overview

@@ -3,8 +3,9 @@
 # ══════════════════════════════════════════════════════════════════════════════
 #
 # These packages are ONLY needed for:
-#   • scripts/generate_regions.py  (SAM automatic region detection)
-#   • scripts/annotate.py          (interactive OpenCV labeling tool)
+#   • scripts/sam_auto_annotate.py   (SAM automatic annotation — bootstrap Step 1)
+#   • scripts/auto_label_with_yolo.py uses requirements.txt (ultralytics), not this file
+#   • scripts/annotate.py            (interactive OpenCV labeling tool — legacy)
 #
 # They are NOT part of the inference Docker image (Dockerfile).
 # The inference image uses requirements.txt instead.
