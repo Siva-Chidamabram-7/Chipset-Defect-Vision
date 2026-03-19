@@ -4,6 +4,49 @@ All significant changes to the project, in reverse-chronological order.
 
 ---
 
+## [Session 10] — 2026-03-19  Full Repository Sync + Dataset Commit
+
+### Overview
+Committed every file in the working tree to bring the GitHub repository fully
+up to date with the local project state.
+
+---
+
+### `.gitignore` — updated
+
+Extended to cover artefact paths that were not previously excluded:
+
+| Pattern added | Reason |
+|---|---|
+| `*.pt` / `yolov8n.pt` | YOLO base weight sometimes written to project root |
+| `data/labels.cache` / `data/**/*.cache` | Binary ultralytics label cache, machine-local |
+| `/gh` | GitHub CLI binary accidentally present in repo root |
+
+The `raw_data/<ClassName>/` folders are intentionally **not** gitignored —
+they contain the tracked training dataset.
+
+---
+
+### `raw_data/` — 809 dataset images committed
+
+All raw PCB defect images are now tracked in the repository.
+
+| Folder | Class ID | Images |
+|---|---|---|
+| `raw_data/Good/` | 6 | 116 |
+| `raw_data/Missing_hole/` | 0 | 115 |
+| `raw_data/Mouse_bite/` | 1 | 115 |
+| `raw_data/Open_circuit/` | 2 | 116 |
+| `raw_data/Short/` | 3 | 116 |
+| `raw_data/Spur/` | 4 | 115 |
+| `raw_data/Spurious_copper/` | 5 | 116 |
+| **Total** | | **809** |
+
+Formats: JPEG + PNG.  These are the direct inputs to
+`scripts/sam_to_yolo.py` (Step 1 of the SAM → YOLO bootstrap pipeline).
+
+---
+
 ## [Session 9] — 2026-03-19  Vertex AI + GCS Cloud Refactor
 
 ### Overview
