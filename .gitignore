@@ -55,6 +55,18 @@ raw_data/regions/**/*.json
 runs/
 datasets/
 
+# ── YOLO / ultralytics build artefacts ───────────────────────────────────────
+# yolov8n.pt sometimes lands in the project root when scripts run from there.
+yolov8n.pt
+*.pt
+# ultralytics auto-generated label cache (binary, machine-local)
+data/labels.cache
+data/**/*.cache
+
+# ── Tooling binaries in project root ─────────────────────────────────────────
+# gh CLI binary (accidentally placed in repo root)
+/gh
+
 # ── OS artefacts ──────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
