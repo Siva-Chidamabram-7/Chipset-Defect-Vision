@@ -105,18 +105,9 @@ RUN pip install --no-cache-dir -r requirements.txt \
 # A final `test -f` assertion turns a silent Python success into a Docker layer
 # failure when the file is missing.
 RUN mkdir -p /app/weights \
-    && python -c " \
-import os, sys, pathlib; \
-os.chdir('/app/weights'); \
-from ultralytics import YOLO; \
-YOLO('yolov8n.pt'); \
-p = pathlib.Path('yolov8n.pt'); \
-size_mb = p.stat().st_size // 1_048_576 if p.exists() else 0; \
-print(f'[Docker] yolov8n.pt downloaded: {size_mb} MB'); \
-sys.exit(0 if p.exists() else 1); \
-" \
+    && python -c "import os,sys,pathlib; os.chdir('/app/weights'); from ultralytics import YOLO; YOLO('yolov8n.pt'); p=pathlib.Path('yolov8n.pt'); mb=p.stat().st_size//1048576 if p.exists() else 0; print('[Docker] yolov8n.pt downloaded: '+str(mb)+' MB'); sys.exit(0 if p.exists() else 1)" \
     && test -f /app/weights/yolov8n.pt \
-    && echo "[Docker] ✓ Base weights verified at /app/weights/yolov8n.pt"
+    && echo "[Docker] Base weights verified at /app/weights/yolov8n.pt"
 
 # ── Layer 6: Application code ─────────────────────────────────────────────────
 # Inference container only.  Intentionally omitted:
