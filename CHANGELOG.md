@@ -4,6 +4,80 @@ All significant changes to the project, in reverse-chronological order.
 
 ---
 
+## [Session 12] — 2026-03-19  Enforce best.pt — Remove All Silent Fallbacks
+
+### Overview
+Fixed the critical deployment bug where the server silently loaded the base
+COCO model (`yolov8n.pt`) instead of the fine-tuned PCB defect model
+(`best.pt`) when `best.pt` was absent from the Docker image.
+
+The system now refuses to start if `best.pt` is missing — at both the Python
+level (hard `RuntimeError`) and the Docker build level (`test -f` assertion
+that aborts the build).
+
+---
+
+### `app/model/predictor.py`
+
+**Root cause removed:** the `elif BASE_WEIGHTS.exists()` branch that silently
+loaded `yolov8n.pt` when `best.pt` was missing.
+
+Changes:
+- Removed `BASE_WEIGHTS` constant and all references to `yolov8n.pt`
+- Removed `_fine_tuned` flag (no longer needed — only one model is supported)
+- `_load_model()` now raises `RuntimeError` immediately if `ultralytics` is
+  missing or `weights/best.pt` does not exist — no silent fallback, no stub mode
+- Startup log now reads: `[Predictor] Loading trained model: <path>/best.pt`
+- Follow-up log confirms loaded classes: `[Predictor] Model ready — classes: [...]`
+- `predict()` simplified: class name always resolved from `CLASS_NAMES`; `model`
+  field in response fixed to `"best.pt"` (was `"fine-tuned"` / `"base-yolov8n"`)
+- Removed `_stub_response()` method entirely
+- Removed unused top-level `import base64` (moved inline to `_encode_image`)
+- `COLORS` dict cleaned: removed `"unknown"` fallback entry (no longer reachable)
+
+---
+
+### `Dockerfile`
+
+- **Removed Layer 5** (`yolov8n.pt` download at build time) — base COCO weights
+  are no longer baked into the image
+- **Added Layer 5a** — a `test -f /app/weights/best.pt` assertion immediately
+  after `COPY weights/ weights/`; the build now **aborts with a clear error
+  message** if `best.pt` is missing from the build context
+- Updated header comment: documents the pre-build requirement to copy
+  `best.pt` from training output before running `docker build`
+
+---
+
+### `app/main.py`
+
+- Fixed `description` string: `"6 defect classes"` → `"7 defect classes"`
+
+---
+
+### Deployment workflow (updated)
+
+Before building the Docker image, `weights/best.pt` must exist locally:
+
+```bash
+# After training completes:
+cp runs/detect/train/weights/best.pt weights/best.pt
+
+# Build (will fail loudly if best.pt is missing):
+docker build -t chipset-defect-vision .
+
+# Run (air-gapped):
+docker run --network none -p 8080:8080 chipset-defect-vision
+```
+
+Startup log will show:
+```
+[Predictor] Loading trained model: /app/weights/best.pt
+[Predictor] Model ready — classes: ['Missing_hole', 'Mouse_bite', ...]
+```
+
+---
+
 ## [Session 11] — 2026-03-19  Production Cleanup + 7-Class Alignment
 
 ### Overview

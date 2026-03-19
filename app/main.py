@@ -15,7 +15,7 @@ from app.utils.image_utils import decode_base64_image, validate_image
 # ── App Init ──────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="Chipset Defect Vision API",
-    description="YOLOv8-powered PCB defect detection — 6 defect classes",
+    description="YOLOv8-powered PCB defect detection — 7 defect classes",
     version="2.0.0",
 )
 

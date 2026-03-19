@@ -4,11 +4,13 @@
 #
 # OFFLINE CONTRACT
 # ────────────────
-# Build  → requires internet (downloads Python deps + YOLOv8n base weights)
+# Build  → requires internet (downloads Python deps) + weights/best.pt on disk
 # Run    → fully air-gapped (zero network calls; all assets baked in)
 #
-# This separation is intentional: build once on a connected machine, ship the
-# resulting image to any offline environment (factory floor, edge server, etc.)
+# Pre-build requirement:
+#   weights/best.pt must exist before running docker build.
+#   Copy it from your training output:
+#     cp runs/detect/train/weights/best.pt weights/best.pt
 #
 # Build:  docker build -t chipset-defect-vision .
 # Run:    docker run --network none -p 8080:8080 chipset-defect-vision
@@ -94,22 +96,8 @@ RUN pip install --no-cache-dir -r requirements.txt \
 # Uncomment the block below and rebuild if you want to run scripts/ in Docker.
 #
 # RUN pip install --no-cache-dir segment-anything==1.0
-#
-# ── Layer 5: Bake YOLOv8n base weights into the image ─────────────────────────
-# This is a BUILD-TIME hard requirement.
-# If the download fails here the build fails — the resulting image must contain
-# the weights so runtime never needs a network connection.
-#
-# Strategy: chdir into weights/ before calling YOLO() so ultralytics saves
-# yolov8n.pt directly to /app/weights/yolov8n.pt (its cwd-first save logic).
-# A final `test -f` assertion turns a silent Python success into a Docker layer
-# failure when the file is missing.
-RUN mkdir -p /app/weights \
-    && python -c "import os,sys,pathlib; os.chdir('/app/weights'); from ultralytics import YOLO; YOLO('yolov8n.pt'); p=pathlib.Path('yolov8n.pt'); mb=p.stat().st_size//1048576 if p.exists() else 0; print('[Docker] yolov8n.pt downloaded: '+str(mb)+' MB'); sys.exit(0 if p.exists() else 1)" \
-    && test -f /app/weights/yolov8n.pt \
-    && echo "[Docker] Base weights verified at /app/weights/yolov8n.pt"
 
-# ── Layer 6: Application code ─────────────────────────────────────────────────
+# ── Layer 5: Application code ─────────────────────────────────────────────────
 # Inference container only.  Intentionally omitted:
 #   training/  — YOLO fine-tuning scripts; run locally, not in the container.
 #   scripts/   — SAM dataset-creation tools; require a GUI + heavy deps.
@@ -117,13 +105,20 @@ RUN mkdir -p /app/weights \
 #   raw_data/  — pre-split source images; excluded by .dockerignore.
 COPY app/      app/
 COPY frontend/ frontend/
-# User-provided fine-tuned weights (best.pt) are copied in here if they exist
-# locally in weights/.  The yolov8n.pt baked in Layer 5 is preserved because
-# the local weights/ directory never contains a tracked yolov8n.pt (it is in
-# .gitignore) — so Layer 5's copy is never overwritten.
+# weights/best.pt MUST exist locally before running docker build.
+# It is intentionally gitignored — copy it from your training output first:
+#   cp runs/detect/train/weights/best.pt weights/best.pt
 COPY weights/  weights/
 
-# ── Layer 7: Runtime user & permissions ───────────────────────────────────────
+# ── Layer 5a: Verify best.pt is present — hard-fail the build if missing ──────
+# A missing model must be caught at build time, not at runtime.
+RUN test -f /app/weights/best.pt \
+    && python -c "from pathlib import Path; p=Path('/app/weights/best.pt'); print('[Docker] best.pt verified: '+str(round(p.stat().st_size/1048576,1))+' MB')" \
+    || (echo '[Docker] ERROR: weights/best.pt not found — build aborted.' \
+        && echo '         Run training and copy best.pt → weights/best.pt, then rebuild.' \
+        && exit 1)
+
+# ── Layer 6: Runtime user & permissions ───────────────────────────────────────
 # Non-root for security.  Home=/app so ultralytics fallback config writes
 # land in /app/.yolo (already set via YOLO_CONFIG_DIR).
 # chown runs AFTER all COPY instructions so nothing is missed.

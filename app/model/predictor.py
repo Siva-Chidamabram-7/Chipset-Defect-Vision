@@ -6,12 +6,12 @@ Wraps YOLOv8 inference for PCB solder defect detection.
 ⚠  OFFLINE-FIRST: this module NEVER attempts a network call.
    All weights must be present on disk before the server starts.
 
-Model priority (checked in order):
-  1. weights/best.pt    ← fine-tuned on the 7-class PCB defect dataset (REQUIRED for production)
-  2. weights/yolov8n.pt ← base COCO weights (development fallback only — class names will not match)
+Required weight file:
+  weights/best.pt  ← fine-tuned on the 7-class PCB defect dataset (MANDATORY)
 
-If neither file exists the predictor enters STUB mode: the server still starts
-and every prediction returns an annotated image with a visible warning overlay.
+If weights/best.pt is missing the server will REFUSE TO START with a clear
+RuntimeError.  There is no silent fallback — every deployment must ship the
+correct model.
 
 Defect classes:
   0 → Missing_hole
@@ -27,7 +27,6 @@ Decision logic:
   • Any detection above CONF_THRESHOLD → status = "DEFECT"
 """
 
-import base64
 import sys
 from pathlib import Path
 from typing import Any
@@ -36,7 +35,6 @@ import cv2
 import numpy as np
 
 # ── ultralytics import ────────────────────────────────────────────────────────
-# Lazy — lets the container start even if torch is still loading.
 try:
     from ultralytics import YOLO
     _YOLO_AVAILABLE = True
@@ -44,13 +42,12 @@ except ImportError:
     _YOLO_AVAILABLE = False
 
 # ── Weight paths ──────────────────────────────────────────────────────────────
-# Both paths are LOCAL.  No network fallback exists — by design.
-WEIGHTS_DIR  = Path(__file__).parent.parent.parent / "weights"
-FINE_TUNED   = WEIGHTS_DIR / "best.pt"      # priority 1
-BASE_WEIGHTS = WEIGHTS_DIR / "yolov8n.pt"   # priority 2 — baked in at build time
+# LOCAL only — no network fallback exists, by design.
+WEIGHTS_DIR = Path(__file__).parent.parent.parent / "weights"
+BEST_PT     = WEIGHTS_DIR / "best.pt"   # the ONE required model file
 
 # ── Class config ──────────────────────────────────────────────────────────────
-# Must match the nc + names defined in !training/data.yaml exactly.
+# Must match nc + names defined in !training/data.yaml exactly.
 CLASS_NAMES = {
     0: "Missing_hole",
     1: "Mouse_bite",
@@ -70,7 +67,6 @@ COLORS = {
     "Spur":            ( 22, 115, 249),   # orange
     "Spurious_copper": (166, 184,  20),   # teal
     "Good":            ( 50, 205,  50),   # green
-    "unknown":         (120, 120, 120),   # grey — base-model fallback
 }
 
 # Detections below this confidence are ignored entirely.
@@ -80,63 +76,44 @@ CONF_THRESHOLD = 0.30
 # ── Predictor ─────────────────────────────────────────────────────────────────
 class SolderDefectPredictor:
     def __init__(self):
-        self._model      = None
-        self._fine_tuned = False
+        self._model = None
         self._load_model()
 
     # ── Model loading ─────────────────────────────────────────────────────────
     def _load_model(self):
         """
-        Load weights strictly from local disk.
-        Raises no exceptions — failures are logged and the predictor enters
-        stub mode so the FastAPI server can still report /health correctly.
+        Load weights/best.pt from local disk.
+
+        Raises RuntimeError if:
+          - ultralytics is not installed
+          - weights/best.pt does not exist
+
+        There is NO silent fallback.  A missing model is always a hard error.
         """
         if not _YOLO_AVAILABLE:
-            print(
-                "[Predictor] WARNING: ultralytics is not installed.\n"
-                "            Running in stub mode (no inference).",
-                file=sys.stderr,
+            raise RuntimeError(
+                "[Predictor] FATAL: ultralytics is not installed.\n"
+                "            Cannot run inference without the ultralytics package."
             )
-            return
 
-        WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
-
-        if FINE_TUNED.exists():
-            # ── Priority 1: fine-tuned 6-class PCB defect model ───────────────
-            print(f"[Predictor] Loading fine-tuned weights: {FINE_TUNED}")
-            self._model      = YOLO(str(FINE_TUNED))
-            self._fine_tuned = True
-
-        elif BASE_WEIGHTS.exists():
-            # ── Priority 2: base YOLOv8n baked into the Docker image ──────────
-            print(f"[Predictor] Loading base weights: {BASE_WEIGHTS}")
-            print(
-                "[Predictor] WARNING: Running on base COCO model — class names\n"
-                "            will not match PCB defect classes until best.pt is\n"
-                "            provided.  All detections will be labelled 'unknown'.",
-                file=sys.stderr,
+        if not BEST_PT.exists():
+            raise RuntimeError(
+                f"[Predictor] FATAL: trained model not found.\n"
+                f"            Expected: {BEST_PT}\n"
+                f"\n"
+                f"            To fix:\n"
+                f"              • Run training and copy best.pt → weights/best.pt, then\n"
+                f"                rebuild the Docker image:  docker build -t chipset-defect-vision .\n"
+                f"              • Or mount the file at runtime:\n"
+                f"                docker run -v $(pwd)/weights/best.pt:/app/weights/best.pt ...\n"
             )
-            self._model      = YOLO(str(BASE_WEIGHTS))
-            self._fine_tuned = False
 
-        else:
-            # ── No weights found — OFFLINE hard stop ──────────────────────────
-            # Do NOT attempt YOLO("yolov8n.pt") — that triggers a network
-            # download which is forbidden in an air-gapped environment.
-            print(
-                "[Predictor] ERROR: No weight files found.\n"
-                f"            Expected one of:\n"
-                f"              • {FINE_TUNED}\n"
-                f"              • {BASE_WEIGHTS}\n"
-                "            Rebuild the Docker image (which bakes in yolov8n.pt)\n"
-                "            or mount weights/best.pt via -v flag.\n"
-                "            Running in STUB mode — inference disabled.",
-                file=sys.stderr,
-            )
-            # _model stays None → is_ready() returns False → stub responses
+        print(f"[Predictor] Loading trained model: {BEST_PT}", flush=True)
+        self._model = YOLO(str(BEST_PT))
+        print(f"[Predictor] Model ready — classes: {list(CLASS_NAMES.values())}", flush=True)
 
     def is_ready(self) -> bool:
-        """True when a model is loaded and can run inference."""
+        """True when the model is loaded and can run inference."""
         return self._model is not None
 
     # ── Inference ─────────────────────────────────────────────────────────────
@@ -149,7 +126,7 @@ class SolderDefectPredictor:
             "status":     "GOOD" | "DEFECT",
             "detections": [{"class": str, "confidence": float, "bbox": [x1,y1,x2,y2]}],
             "image":      <base64-encoded annotated JPEG>,
-            "model":      "fine-tuned" | "base-yolov8n" | "stub — no weights found"
+            "model":      "best.pt"
           }
 
         Decision rule:
@@ -159,9 +136,6 @@ class SolderDefectPredictor:
         img_bgr = cv2.imread(image_path)
         if img_bgr is None:
             raise ValueError(f"Cannot read image: {image_path}")
-
-        if not _YOLO_AVAILABLE or self._model is None:
-            return self._stub_response(img_bgr)
 
         results = self._model.predict(
             source=image_path,
@@ -176,18 +150,10 @@ class SolderDefectPredictor:
         if results.boxes is not None:
             for box in results.boxes:
                 x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-                conf = float(box.conf[0])
-                cls  = int(box.cls[0])
-
-                # Use class names from the fine-tuned model's own metadata when
-                # available; fall back to our CLASS_NAMES dict; "unknown" for the
-                # base COCO model (class IDs do not map to PCB defect classes).
-                if self._fine_tuned:
-                    class_name = CLASS_NAMES.get(cls, "unknown")
-                else:
-                    class_name = "unknown"
-
-                color = COLORS.get(class_name, COLORS["unknown"])
+                conf       = float(box.conf[0])
+                cls        = int(box.cls[0])
+                class_name = CLASS_NAMES.get(cls, "unknown")
+                color      = COLORS.get(class_name, (120, 120, 120))
                 self._draw_box(annotated, x1, y1, x2, y2, class_name, conf, color)
                 detections.append({
                     "class":      class_name,
@@ -202,7 +168,7 @@ class SolderDefectPredictor:
             "status":     status,
             "detections": detections,
             "image":      self._encode_image(annotated),
-            "model":      "fine-tuned" if self._fine_tuned else "base-yolov8n",
+            "model":      "best.pt",
         }
 
     # ── Helpers ───────────────────────────────────────────────────────────────
@@ -230,26 +196,6 @@ class SolderDefectPredictor:
 
     @staticmethod
     def _encode_image(img: np.ndarray) -> str:
+        import base64
         _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 90])
         return base64.b64encode(buf).decode("utf-8")
-
-    def _stub_response(self, img: np.ndarray) -> dict:
-        """
-        Returned when no model is loaded.
-        Overlays a visible warning on the image so the problem is unmissable
-        in the UI — much better than a silent empty-detections response.
-        """
-        stub    = img.copy()
-        overlay = stub.copy()
-        cv2.rectangle(overlay, (0, 0), (stub.shape[1], 60), (30, 30, 30), -1)
-        cv2.addWeighted(overlay, 0.6, stub, 0.4, 0, stub)
-        cv2.putText(
-            stub, "NO MODEL LOADED — check weights/ directory",
-            (10, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 80, 255), 2, cv2.LINE_AA,
-        )
-        return {
-            "status":     "GOOD",   # no model → no detections → neutral status
-            "detections": [],
-            "image":      self._encode_image(stub),
-            "model":      "stub — no weights found",
-        }
