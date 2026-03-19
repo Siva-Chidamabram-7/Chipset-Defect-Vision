@@ -359,6 +359,10 @@ def main() -> None:
                 max_cover= args.max_cover,
             )
 
+            # ── Keep only top 5 boxes by area (w × h), descending ────────────
+            if len(boxes) > 5:
+                boxes = sorted(boxes, key=lambda b: b[2] * b[3], reverse=True)[:5]
+
             # ── Fallback: full-image box if SAM yields nothing valid ───────────
             used_fallback = False
             if not boxes:
