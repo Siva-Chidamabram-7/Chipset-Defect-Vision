@@ -4,6 +4,153 @@ All significant changes to the project, in reverse-chronological order.
 
 ---
 
+## [Session 13] — 2026-03-19  Full Production Refactor — Minimal Docker + Training Consolidation
+
+### Overview
+Comprehensive production hardening pass.  Two primary goals:
+
+1. **Shrink Docker build context** from ~1.1 GB to <10 MB by rewriting
+   `.dockerignore` with a default-deny strategy (`**`) and re-including only
+   the four things the running container needs.
+
+2. **Consolidate training concerns** — all training code, configs, scripts,
+   Dockerfiles, and requirements moved into a single `training/` directory so
+   the repository has a clear separation of concerns.
+
+---
+
+### Repository restructure
+
+| Before | After | Reason |
+|---|---|---|
+| `!training/train.py` | `training/train.py` | Consolidate under `training/` |
+| `!training/data.yaml` | `training/data.yaml` | Consolidate; replace smaller stub |
+| `Dockerfile.training` | `training/Dockerfile` | Training concern |
+| `requirements-sam.txt` | `training/requirements-sam.txt` | Training concern |
+| `requirements-training.txt` | `training/requirements-training.txt` | Training concern |
+| `scripts/` (6 files) | `training/scripts/` | Training/SAM concern |
+| `yolov8n.pt` (root) | *(deleted)* | Untracked stray binary — gitignored, not needed |
+
+`!training/` directory removed (empty after consolidation).
+
+---
+
+### `.dockerignore` — complete rewrite
+
+**Strategy changed from "explicit exclusions" to "default deny + explicit allow".**
+
+Old approach: listed exclusions one by one → any new file added to the repo
+would silently enter the build context.
+
+New approach:
+```
+**                   ← exclude everything by default
+!app/**              ← re-include only inference app
+!frontend/**         ← re-include only UI
+!requirements.txt    ← re-include only inference deps
+!weights/
+!weights/best.pt     ← re-include ONLY the trained model
+```
+
+Build context reduction: **~1.1 GB → <10 MB**
+
+---
+
+### `Dockerfile` — cleanup and hardening
+
+- Removed the old Layer 5 `yolov8n.pt` download block (already removed in
+  Session 12; now also removed from comments and architecture notes)
+- Changed `COPY weights/ weights/` → `COPY weights/best.pt weights/best.pt`
+  (explicit file copy — cannot accidentally include `last.pt`, `*.pth`, etc.)
+- Replaced `test -f` shell assertion with a Python verification script that
+  also checks file size (>1 MB guard against corrupt/empty copies)
+- Added `incoming_data/` pre-creation in Layer 6 so the non-root `appuser`
+  can write to it without a runtime `mkdir`
+- Removed commented-out SAM layer (dead code)
+- Split long `CMD` onto one flag per line for readability
+
+---
+
+### `requirements.txt` — inference-only
+
+Removed two packages that are only needed by training scripts:
+- `gcsfs==2024.3.1` — used only in `training/scripts/gcs_utils.py`
+- `google-cloud-storage==2.16.0` — same
+
+The inference server reads local files only; it never touches GCS.
+These deps added ~60 MB of transitive packages to the Docker image for zero
+runtime benefit.
+
+---
+
+### `app/main.py` — startup log + lifespan
+
+- Added FastAPI `lifespan` handler:
+  prints `[Server] Model loaded: True` at startup — confirms model is ready
+  before the first request is accepted
+- Condensed `save_path.write_bytes(img_bytes)` inline (no intermediate var)
+- Fixed `/predict` docstring: `"model": "best.pt"` (was stale `"fine-tuned" | "base-yolov8n"`)
+- Added `_ROOT` constant to avoid repeating `Path(__file__).parent.parent`
+
+---
+
+### `training/data.yaml` — path comment fix
+
+Updated comment: `data.yaml lives in  !training/` → `data.yaml lives in  training/`
+(functional `path: ../data` was already correct; only the human-readable
+comment was wrong)
+
+---
+
+### Estimated build metrics (after this session)
+
+| Metric | Before | After |
+|---|---|---|
+| Docker build context | ~1.1 GB | <10 MB |
+| Docker image size | ~900 MB | ~900 MB (same — PyTorch dominates) |
+| `requirements.txt` deps | 10 packages | 8 packages |
+| Training files in inference build | many | **zero** |
+| Model fallbacks | 0 (fixed S12) | 0 |
+
+The image size stays the same because PyTorch CPU (~500 MB) dominates.
+The build **speed** improvement comes from the 100× smaller build context.
+
+---
+
+### Verification checklist
+
+```bash
+# 1. Confirm build context is small
+docker build --no-cache -t chipset-defect-vision . 2>&1 | grep "Sending build context"
+# Expected: "Sending build context to Docker daemon  X.XXkB"  (single-digit MB)
+
+# 2. Confirm best.pt verification fires
+docker build -t chipset-defect-vision . 2>&1 | grep "best.pt verified"
+# Expected: "[Docker] ✓ best.pt verified: XX.X MB — build OK"
+
+# 3. Confirm correct model at startup
+docker run --rm chipset-defect-vision python -c "
+from app.model.predictor import SolderDefectPredictor
+p = SolderDefectPredictor()
+print('model ready:', p.is_ready())
+"
+# Expected: [Predictor] Loading trained model: /app/weights/best.pt
+#           [Predictor] Model ready — classes: [...]
+#           model ready: True
+
+# 4. Confirm no training files in image
+docker run --rm chipset-defect-vision find /app -name "*.py" | sort
+# Expected: only app/ files — no training/, scripts/, sam_*.py, etc.
+
+# 5. Health check
+docker run -d -p 8080:8080 --name cdv chipset-defect-vision
+curl http://localhost:8080/health
+# Expected: {"status":"ok","model_loaded":true,"version":"2.0.0"}
+docker rm -f cdv
+```
+
+---
+
 ## [Session 12] — 2026-03-19  Enforce best.pt — Remove All Silent Fallbacks
 
 ### Overview

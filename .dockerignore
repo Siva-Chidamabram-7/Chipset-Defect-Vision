@@ -1,12 +1,45 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# .dockerignore — Inference image build context filter
+# .dockerignore — Inference image build context
 #
-# Rule: only include what the RUNNING CONTAINER needs.
-#   Included → app/  frontend/  weights/  requirements.txt
-#   Excluded → everything else (training code, datasets, dev tools, OS noise)
+# Strategy: EXCLUDE EVERYTHING — then allow only what the running container
+# actually needs.
 #
-# Keeping the build context small speeds up `docker build` and prevents
-# accidental inclusion of large dataset files or secrets.
+#   INCLUDED (inference runtime):
+#     app/              FastAPI application + model loader
+#     frontend/         Static glassmorphic UI (HTML / CSS / JS)
+#     weights/best.pt   Fine-tuned 7-class PCB defect model  ← ONLY this file
+#     requirements.txt  Pinned inference dependencies
+#
+#   EXCLUDED (everything else):
+#     Training code, SAM scripts, datasets, runs, docs, dev tools, OS noise
+#
+# Keeping the build context small:
+#   • Speeds up  docker build  (no multi-hundred-MB data transfer to daemon)
+#   • Prevents accidental inclusion of dataset images, model checkpoints,
+#     SAM weights, or secrets
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# ── Default: exclude everything ───────────────────────────────────────────────
+**
+
+# ── Re-include: inference application ─────────────────────────────────────────
+!app/
+!app/**
+!frontend/
+!frontend/**
+!requirements.txt
+
+# ── Re-include: ONLY the trained inference model ───────────────────────────────
+# weights/ is excluded by default above; we punch through exactly one file.
+!weights/
+!weights/best.pt
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXPLICIT EXCLUSIONS — belt-and-suspenders on top of the default-deny above.
+# These are listed so intent is obvious to future readers even if the default-
+# deny pattern is ever modified.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Version control ───────────────────────────────────────────────────────────
@@ -14,48 +47,53 @@
 .gitignore
 .gitattributes
 
-# ── Python artefacts ──────────────────────────────────────────────────────────
-__pycache__
-**/__pycache__
-*.pyc
-*.pyo
-*.pyd
-*.egg-info
-.pytest_cache
-*.log
-
-# ── Local virtual environments & secrets ──────────────────────────────────────
-.venv
-venv
-env
-.env
-*.env
-
-# ── ML training code (local only — never runs inside the container) ───────────
+# ── Training pipeline (code + configs) ────────────────────────────────────────
 training/
 [!]training/
-
-# ── Dataset-creation scripts (SAM + annotation tools — GUI + heavy deps) ──────
 scripts/
+Dockerfile.training
 
-# ── Dataset directories (can be gigabytes — not needed for inference) ─────────
-data/
-raw_data/
-datasets/
-runs/
-
-# ── Training / SAM / dev-only Python dependencies ────────────────────────────
+# ── Training-only dependency files ────────────────────────────────────────────
 requirements-sam.txt
 requirements-training.txt
 
-# ── Training image Dockerfile (not needed for inference build) ────────────────
-Dockerfile.training
+# ── Dataset directories (can be gigabytes) ────────────────────────────────────
+data/
+raw_data/
+datasets/
 
-# ── Stray build artefacts ─────────────────────────────────────────────────────
-gh
+# ── Training run artifacts ─────────────────────────────────────────────────────
+runs/
+
+# ── All weights EXCEPT best.pt ────────────────────────────────────────────────
+weights/last.pt
+weights/yolov8n.pt
+weights/*.pth
+
+# ── Root-level stray binaries ─────────────────────────────────────────────────
 yolov8n.pt
+gh
 
-# ── Documentation ─────────────────────────────────────────────────────────────
+# ── Python artifacts ──────────────────────────────────────────────────────────
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+*.log
+
+# ── Local virtual environments ────────────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── Secrets ───────────────────────────────────────────────────────────────────
+.env
+*.env
+
+# ── Documentation (not needed at runtime) ─────────────────────────────────────
 README.md
 CHANGELOG.md
 docs/
@@ -65,10 +103,13 @@ docs/
 Thumbs.db
 
 # ── IDE / editor config ───────────────────────────────────────────────────────
-.vscode
-.idea
+.vscode/
+.idea/
 *.sublime-project
 *.sublime-workspace
 
 # ── Node (not used — safety net) ──────────────────────────────────────────────
-node_modules
+node_modules/
+
+# ── Runtime-generated directories (created at startup, not at build time) ─────
+incoming_data/

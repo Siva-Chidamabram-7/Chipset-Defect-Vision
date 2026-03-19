@@ -1,6 +1,7 @@
 import os
 import time
 import tempfile
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
@@ -12,11 +13,32 @@ import uvicorn
 from app.model.predictor import SolderDefectPredictor
 from app.utils.image_utils import decode_base64_image, validate_image
 
+# ── Model (loaded once at startup — fails loudly if weights/best.pt missing) ──
+predictor = SolderDefectPredictor()
+
+# ── Paths ──────────────────────────────────────────────────────────────────────
+_ROOT        = Path(__file__).parent.parent
+frontend_dir = _ROOT / "frontend"
+INCOMING_DIR = _ROOT / "incoming_data"
+INCOMING_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# ── Lifespan ──────────────────────────────────────────────────────────────────
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    print("[Server] Chipset Defect Vision — inference server ready", flush=True)
+    print(f"[Server] Model loaded: {predictor.is_ready()}", flush=True)
+    print(f"[Server] Incoming images → {INCOMING_DIR}", flush=True)
+    yield
+    print("[Server] Shutting down", flush=True)
+
+
 # ── App Init ──────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="Chipset Defect Vision API",
-    description="YOLOv8-powered PCB defect detection — 7 defect classes",
+    description="YOLOv8-powered PCB solder defect detection — 7 defect classes",
     version="2.0.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -26,18 +48,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Model ─────────────────────────────────────────────────────────────────────
-predictor = SolderDefectPredictor()
-
-# ── Static Frontend ───────────────────────────────────────────────────────────
-frontend_dir = Path(__file__).parent.parent / "frontend"
+# ── Static frontend ────────────────────────────────────────────────────────────
 app.mount("/static", StaticFiles(directory=str(frontend_dir)), name="static")
-
-# ── Incoming image storage ────────────────────────────────────────────────────
-# Every image sent to /predict is persisted here for audit and retraining.
-# Filenames are Unix timestamps (e.g. 1712345678.jpg).
-INCOMING_DIR = Path(__file__).parent.parent / "incoming_data"
-INCOMING_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -49,9 +61,9 @@ async def root():
 @app.get("/health")
 async def health():
     return {
-        "status": "ok",
+        "status":       "ok",
         "model_loaded": predictor.is_ready(),
-        "version": "2.0.0",
+        "version":      "2.0.0",
     }
 
 
@@ -68,10 +80,10 @@ async def predict(
         "status":     "GOOD" | "DEFECT",
         "detections": [{"class": str, "confidence": float, "bbox": [x1,y1,x2,y2]}],
         "image":      <base64-encoded annotated JPEG>,
-        "model":      "fine-tuned" | "base-yolov8n"
+        "model":      "best.pt"
       }
 
-    The incoming image is also saved to incoming_data/<timestamp>.jpg for
+    The incoming image is also persisted to incoming_data/<timestamp>.jpg for
     audit and future retraining purposes.
     """
     if file is None and image_base64 is None:
@@ -95,17 +107,15 @@ async def predict(
             tmp.write(img_bytes)
 
         # ── Persist incoming image ────────────────────────────────────────────
-        save_path = INCOMING_DIR / f"{int(time.time())}.jpg"
-        save_path.write_bytes(img_bytes)
+        (INCOMING_DIR / f"{int(time.time())}.jpg").write_bytes(img_bytes)
 
-        result = predictor.predict(tmp_path)
-        return JSONResponse(content=result)
+        return JSONResponse(content=predictor.predict(tmp_path))
 
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.remove(tmp_path)
 
 
-# ── Entry Point ───────────────────────────────────────────────────────────────
+# ── Entry point (local dev only) ───────────────────────────────────────────────
 if __name__ == "__main__":
     uvicorn.run("app.main:app", host="0.0.0.0", port=8080, reload=False)

@@ -1,6 +1,36 @@
-path: ../data
-train: images
-val: images
+# ══════════════════════════════════════════════════════════════════════════════
+# PCB Defect Detection — Dataset Configuration
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Dataset source: Roboflow export in YOLOv8 format
+#   Export your dataset from Roboflow as "YOLOv8" and place the split
+#   directories under data/ so the layout matches below.
+#
+# Expected directory layout (relative to project root):
+#
+#   data/
+#   ├── images/
+#   │   ├── train/   ← training images (.jpg / .png)
+#   │   └── val/     ← validation images
+#   └── labels/
+#       ├── train/   ← YOLO-format .txt annotations
+#       └── val/
+#
+# Label format per line:
+#   <class_id> <x_center> <y_center> <width> <height>   (all values 0–1)
+#
+# ── Path resolution ───────────────────────────────────────────────────────────
+# `path` is resolved relative to THIS yaml file's location.
+# data.yaml lives in  training/
+# ../data          resolves to  <project_root>/data/
+# ══════════════════════════════════════════════════════════════════════════════
+
+path: ../data          # dataset root — relative to training/data.yaml
+
+train: images/train    # → <project_root>/data/images/train
+val:   images/val      # → <project_root>/data/images/val
+
+nc: 7
 names:
   0: Missing_hole
   1: Mouse_bite
