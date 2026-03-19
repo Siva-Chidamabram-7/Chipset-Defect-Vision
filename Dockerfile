@@ -82,24 +82,15 @@ COPY weights/best.pt weights/best.pt
 # Hard-fail the build if best.pt is missing or suspiciously small.
 # A missing model at build time is infinitely better than a silent failure
 # at runtime in production.
-RUN python - <<'EOF'
-from pathlib import Path
-p = Path("/app/weights/best.pt")
-if not p.exists():
-    raise SystemExit(
-        "\n[Docker] FATAL: weights/best.pt not found.\n"
-        "         Run training and copy the result first:\n"
-        "           cp runs/detect/train/weights/best.pt weights/best.pt\n"
-        "         Then rebuild: docker build -t chipset-defect-vision .\n"
-    )
-mb = round(p.stat().st_size / 1_048_576, 1)
-if mb < 1:
-    raise SystemExit(
-        f"\n[Docker] FATAL: weights/best.pt is only {mb} MB — likely corrupt.\n"
-        "         Re-copy the file from your training output and rebuild.\n"
-    )
-print(f"[Docker] ✓ best.pt verified: {mb} MB — build OK")
-EOF
+RUN python -c "\
+import sys; \
+from pathlib import Path; \
+p = Path('/app/weights/best.pt'); \
+(not p.exists()) and sys.exit('[Docker] FATAL: weights/best.pt not found. Copy from training output: cp runs/detect/train/weights/best.pt weights/best.pt — then rebuild.'); \
+mb = round(p.stat().st_size / 1048576, 1); \
+(mb < 1) and sys.exit('[Docker] FATAL: weights/best.pt is only ' + str(mb) + ' MB — likely corrupt. Re-copy from training output and rebuild.'); \
+print('[Docker] best.pt verified: ' + str(mb) + ' MB — build OK') \
+"
 
 # ── Layer 6: Non-root runtime user ────────────────────────────────────────────
 # appuser/appgroup — principle of least privilege for Cloud Run + K8s.
