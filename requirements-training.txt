@@ -1,0 +1,67 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# requirements-training.txt — Full training pipeline environment
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Used by:
+#   • Dockerfile.training                        (cloud / Vertex AI training)
+#   • scripts/sam_auto_annotate.py               (Step 1 — SAM annotation)
+#   • scripts/auto_label_with_yolo.py            (Step 3 — YOLO re-labelling)
+#   • !training/train.py                         (Step 2 / 4 — YOLO training)
+#   • scripts/gcs_utils.py                       (GCS I/O helper)
+#
+# NOT used by the inference Docker image (Dockerfile) — use requirements.txt.
+#
+# ── Install (local dev — separate venv recommended) ──────────────────────────
+#
+# 1. Create a training venv:
+#      python -m venv .venv-train
+#      .venv-train\Scripts\activate   # Windows
+#      source .venv-train/bin/activate # macOS / Linux
+#
+# 2. Install PyTorch (CPU):
+#      pip install torch==2.3.0 torchvision==0.18.0 \
+#          --index-url https://download.pytorch.org/whl/cpu
+#
+#    Or GPU (CUDA 12.1):
+#      pip install torch==2.3.0 torchvision==0.18.0 \
+#          --index-url https://download.pytorch.org/whl/cu121
+#
+# 3. Install this file:
+#      pip install -r requirements-training.txt
+#
+# ── SAM checkpoint ────────────────────────────────────────────────────────────
+# Download once on a connected machine, then transfer to weights/:
+#   wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth \
+#        -O weights/sam_vit_b.pth      # ViT-B — 375 MB, recommended
+#   wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth \
+#        -O weights/sam_vit_l.pth      # ViT-L — 1.2 GB
+#   wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth \
+#        -O weights/sam_vit_h.pth      # ViT-H — 2.4 GB, best quality
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Deep Learning ─────────────────────────────────────────────────────────────
+# torch + torchvision must be installed separately from the appropriate wheel.
+# See install instructions above.  They are intentionally NOT listed here to
+# avoid pulling the wrong CUDA/CPU variant from PyPI.
+#
+# ultralytics — YOLOv8 training + inference
+ultralytics==8.2.18
+
+# ── SAM — Segment Anything Model (Meta AI) ────────────────────────────────────
+segment-anything==1.0
+
+# ── Computer Vision ───────────────────────────────────────────────────────────
+# Full opencv-python (with GUI) for local workstation use.
+# Dockerfile.training replaces this with opencv-python-headless after install.
+opencv-python==4.9.0.80
+numpy==1.26.4
+Pillow==10.3.0
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+PyYAML==6.0.1
+
+# ── Google Cloud Storage ──────────────────────────────────────────────────────
+# Required for reading/writing data and models from/to GCS.
+# Used by scripts/gcs_utils.py, which is imported by all three pipeline scripts.
+gcsfs==2024.3.1
+google-cloud-storage==2.16.0

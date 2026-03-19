@@ -17,6 +17,9 @@ INPUT layout expected (--input):
     ├── Spur/
     └── Spurious_copper/
 
+    GCS is also supported:
+    --input gs://my-bucket/dataset/
+
 OUTPUT layout produced (--output):
     data/
     ├── images/
@@ -26,15 +29,25 @@ OUTPUT layout produced (--output):
         ├── train/
         └── val/
 
+    GCS output: --output gs://my-bucket/data/
+
 Usage (from project root):
+    # Local
     python scripts/sam_auto_annotate.py
     python scripts/sam_auto_annotate.py --input dataset/ --output data/
     python scripts/sam_auto_annotate.py --sam-weights weights/sam_vit_b.pth
     python scripts/sam_auto_annotate.py --val-split 0.2 --overwrite
 
+    # GCS (Vertex AI / Cloud)
+    python scripts/sam_auto_annotate.py \
+        --input  gs://my-bucket/dataset/ \
+        --output gs://my-bucket/data/ \
+        --sam-weights gs://my-bucket/weights/sam_vit_b.pth \
+        --device cuda
+
 Requirements:
-    pip install -r requirements-sam.txt
-    # SAM checkpoint in weights/ (see requirements-sam.txt for download URLs)
+    pip install -r requirements-training.txt
+    # SAM checkpoint in weights/ (see requirements-training.txt for download URLs)
 
 Bootstrap pipeline:
     Step 1  python scripts/sam_auto_annotate.py       # SAM labels → data/
@@ -47,9 +60,11 @@ Bootstrap pipeline:
 from __future__ import annotations
 
 import argparse
+import logging
 import random
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import cv2
@@ -57,6 +72,11 @@ import numpy as np
 
 # ── Project root ──────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+# Configured in main() via gcs_utils.setup_logging() so that log level can be
+# controlled from the CLI and output is captured by Vertex AI / Docker.
+log = logging.getLogger("sam_annotate")
 
 # ── Class map — must stay in sync with !training/data.yaml ───────────────────
 CLASS_MAP: dict[str, int] = {
@@ -90,16 +110,25 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument(
-        "--input", default="dataset",
-        help="Root folder containing one sub-directory per defect class.",
+        "--input", default=None,
+        help=(
+            "Root folder containing one sub-directory per defect class.  "
+            "Accepts local path or gs://bucket/prefix."
+        ),
     )
     p.add_argument(
-        "--output", default="data",
-        help="Output root for the YOLO train/val split.",
+        "--output", default=None,
+        help=(
+            "Output root for the YOLO train/val split.  "
+            "Accepts local path or gs://bucket/prefix."
+        ),
     )
     p.add_argument(
-        "--sam-weights", default="weights/sam_vit_h.pth",
-        help="Path to SAM checkpoint (.pth).  Filename must contain vit_b, vit_l, or vit_h.",
+        "--sam-weights", default=None,
+        help=(
+            "Path to SAM checkpoint (.pth).  Filename must contain vit_b, vit_l, "
+            "or vit_h.  Accepts local path or gs://bucket/blob."
+        ),
     )
     p.add_argument(
         "--device", default="cpu",
@@ -125,6 +154,20 @@ def parse_args() -> argparse.Namespace:
         "--overwrite", action="store_true",
         help="Re-annotate images that already have a label file.",
     )
+    p.add_argument(
+        "--log-level", default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Logging verbosity (passed to Python logging module).",
+    )
+    # ── Environment-variable defaults (set by Vertex AI or CI) ────────────────
+    # The script reads these so it can be driven entirely by env vars,
+    # which is the standard Vertex AI custom-training-job pattern.
+    import os
+    p.set_defaults(
+        input       = os.environ.get("SAM_INPUT_PATH",   "dataset"),
+        output      = os.environ.get("SAM_OUTPUT_PATH",  "data"),
+        sam_weights = os.environ.get("SAM_WEIGHTS_PATH", "weights/sam_vit_h.pth"),
+    )
     return p.parse_args()
 
 
@@ -138,11 +181,11 @@ def detect_model_type(weights_path: Path) -> str:
     for variant in ("vit_h", "vit_l", "vit_b"):
         if variant in name:
             return variant
-    print(
-        f"[SAM] WARNING: Cannot infer model type from '{weights_path.name}'.\n"
-        "              Defaulting to vit_h.  Rename the file to include\n"
-        "              'vit_b', 'vit_l', or 'vit_h' to silence this warning.",
-        file=sys.stderr,
+    log.warning(
+        "[SAM] Cannot infer model type from '%s'. "
+        "Defaulting to vit_h.  Rename the file to include "
+        "'vit_b', 'vit_l', or 'vit_h' to silence this warning.",
+        weights_path.name,
     )
     return "vit_h"
 
@@ -308,211 +351,236 @@ def write_labels(
 
 def main() -> None:
     args = parse_args()
+
+    # ── Logging setup (Vertex AI + Docker compatible) ─────────────────────────
+    from scripts.gcs_utils import setup_logging, is_gcs_path, resolve_input_path, \
+        resolve_input_file, upload_gcs_dir
+    setup_logging(level=getattr(logging, args.log_level.upper(), logging.INFO))
+
+    log.info("=" * 60)
+    log.info("[SAM] Step 1 — SAM Auto-Annotation starting")
+    log.info("[SAM] Input path    : %s", args.input)
+    log.info("[SAM] Output path   : %s", args.output)
+    log.info("[SAM] SAM weights   : %s", args.sam_weights)
+    log.info("[SAM] Device        : %s", args.device)
+    log.info("[SAM] Val split     : %.0f%%", args.val_split * 100)
+    log.info("[SAM] Seed          : %d", args.seed)
+    log.info("=" * 60)
+
     random.seed(args.seed)
 
-    # ── Resolve paths ─────────────────────────────────────────────────────────
-    input_dir   = Path(args.input)
-    output_dir  = Path(args.output)
-    sam_weights = Path(args.sam_weights)
+    # ── GCS / local path resolution ───────────────────────────────────────────
+    # Create a single temp dir for all downloads in this run.
+    _tmpdir = tempfile.mkdtemp(prefix="pcb_sam_")
+    tmp     = Path(_tmpdir)
 
-    if not input_dir.is_absolute():
-        input_dir   = PROJECT_ROOT / input_dir
-    if not output_dir.is_absolute():
-        output_dir  = PROJECT_ROOT / output_dir
-    if not sam_weights.is_absolute():
-        sam_weights = PROJECT_ROOT / sam_weights
-
-    # ── Validate inputs ───────────────────────────────────────────────────────
-    if not input_dir.exists():
-        print(f"[SAM] ERROR: Input directory not found: {input_dir}", file=sys.stderr)
-        sys.exit(1)
-
-    if not sam_weights.exists():
-        print(
-            f"[SAM] ERROR: SAM checkpoint not found: {sam_weights}\n"
-            "\n"
-            "  Download one of the following on a connected machine and transfer\n"
-            "  it to the weights/ directory:\n"
-            "\n"
-            "    ViT-H (~2.4 GB — best quality):\n"
-            "      https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth\n"
-            "      → save as weights/sam_vit_h.pth\n"
-            "\n"
-            "    ViT-L (~1.2 GB):\n"
-            "      https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth\n"
-            "      → save as weights/sam_vit_l.pth\n"
-            "\n"
-            "    ViT-B (~375 MB — fastest):\n"
-            "      https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth\n"
-            "      → save as weights/sam_vit_b.pth",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    # ── Discover class folders ────────────────────────────────────────────────
-    class_dirs: dict[str, Path] = {
-        d.name: d
-        for d in sorted(input_dir.iterdir())
-        if d.is_dir() and d.name in CLASS_MAP
-    }
-
-    if not class_dirs:
-        print(
-            f"[SAM] ERROR: No recognised class folders found in {input_dir}\n"
-            f"             Expected one or more of: {list(CLASS_MAP.keys())}\n"
-            f"             Got: {[d.name for d in input_dir.iterdir() if d.is_dir()]}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    unknown = [
-        d.name for d in input_dir.iterdir()
-        if d.is_dir() and d.name not in CLASS_MAP
-    ]
-    if unknown:
-        print(
-            f"[SAM] WARNING: Ignoring unrecognised folder(s): {unknown}",
-            file=sys.stderr,
-        )
-
-    print(f"[SAM] Input        : {input_dir}")
-    print(f"[SAM] Output       : {output_dir}")
-    print(f"[SAM] SAM weights  : {sam_weights}")
-    print(f"[SAM] Device       : {args.device}")
-    print(f"[SAM] Val split    : {args.val_split:.0%}")
-    print(f"[SAM] Classes      : {list(class_dirs.keys())}\n")
-
-    # ── Load SAM ──────────────────────────────────────────────────────────────
     try:
-        from segment_anything import sam_model_registry, SamAutomaticMaskGenerator
-    except ImportError:
-        print(
-            "[SAM] ERROR: segment_anything package not installed.\n"
-            "             Install it:  pip install -r requirements-sam.txt",
-            file=sys.stderr,
+        # -- Input dataset: download from GCS if needed -----------------------
+        input_dir = resolve_input_path(args.input, tmp, "input")
+        if not input_dir.is_absolute():
+            input_dir = PROJECT_ROOT / input_dir
+
+        # -- SAM weights: download from GCS if needed -------------------------
+        sam_weights = resolve_input_file(args.sam_weights, tmp, Path(args.sam_weights).name)
+        if not sam_weights.is_absolute() and not is_gcs_path(args.sam_weights):
+            sam_weights = PROJECT_ROOT / sam_weights
+
+        # -- Output dir: local staging (will upload to GCS at the end) --------
+        output_is_gcs = is_gcs_path(args.output)
+        if output_is_gcs:
+            output_dir = tmp / "output"
+            output_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            output_dir = Path(args.output)
+            if not output_dir.is_absolute():
+                output_dir = PROJECT_ROOT / output_dir
+
+        # ── Validate inputs ───────────────────────────────────────────────────
+        if not input_dir.exists():
+            log.error("[SAM] Input directory not found: %s", input_dir)
+            sys.exit(1)
+
+        if not sam_weights.exists():
+            log.error(
+                "[SAM] SAM checkpoint not found: %s\n\n"
+                "  Download one of the following and place in weights/:\n"
+                "    ViT-H (~2.4 GB — best quality):\n"
+                "      https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth\n"
+                "      → save as weights/sam_vit_h.pth\n"
+                "    ViT-L (~1.2 GB):\n"
+                "      https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth\n"
+                "      → save as weights/sam_vit_l.pth\n"
+                "    ViT-B (~375 MB — fastest):\n"
+                "      https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth\n"
+                "      → save as weights/sam_vit_b.pth",
+                sam_weights,
+            )
+            sys.exit(1)
+
+        # ── Discover class folders ────────────────────────────────────────────
+        class_dirs: dict[str, Path] = {
+            d.name: d
+            for d in sorted(input_dir.iterdir())
+            if d.is_dir() and d.name in CLASS_MAP
+        }
+
+        if not class_dirs:
+            log.error(
+                "[SAM] No recognised class folders found in %s\n"
+                "      Expected one or more of: %s\n"
+                "      Got: %s",
+                input_dir,
+                list(CLASS_MAP.keys()),
+                [d.name for d in input_dir.iterdir() if d.is_dir()],
+            )
+            sys.exit(1)
+
+        unknown = [
+            d.name for d in input_dir.iterdir()
+            if d.is_dir() and d.name not in CLASS_MAP
+        ]
+        if unknown:
+            log.warning("[SAM] Ignoring unrecognised folder(s): %s", unknown)
+
+        log.info("[SAM] Classes found : %s", list(class_dirs.keys()))
+
+        # ── Load SAM ──────────────────────────────────────────────────────────
+        try:
+            from segment_anything import sam_model_registry, SamAutomaticMaskGenerator
+        except ImportError:
+            log.error(
+                "[SAM] segment_anything package not installed.\n"
+                "      Install it:  pip install -r requirements-training.txt"
+            )
+            sys.exit(1)
+
+        model_type = detect_model_type(sam_weights)
+        log.info("[SAM] Loading SAM checkpoint: %s (type=%s)", sam_weights.name, model_type)
+
+        sam = sam_model_registry[model_type](checkpoint=str(sam_weights))
+        sam.to(device=args.device)
+        sam.eval()
+
+        mask_generator = SamAutomaticMaskGenerator(
+            model                  = sam,
+            points_per_side        = 32,
+            pred_iou_thresh        = 0.88,
+            stability_score_thresh = _MIN_STABILITY,
+            box_nms_thresh         = _NMS_IOU_THRESH,
+            min_mask_region_area   = args.min_area,
         )
-        sys.exit(1)
 
-    model_type = detect_model_type(sam_weights)
-    print(f"[SAM] Loading {model_type} checkpoint …")
+        log.info("[SAM] Model loaded. Starting annotation ...")
 
-    sam = sam_model_registry[model_type](checkpoint=str(sam_weights))
-    sam.to(device=args.device)
-    sam.eval()
+        # ── Create output directory structure ─────────────────────────────────
+        for split in ("train", "val"):
+            (output_dir / "images" / split).mkdir(parents=True, exist_ok=True)
+            (output_dir / "labels" / split).mkdir(parents=True, exist_ok=True)
 
-    mask_generator = SamAutomaticMaskGenerator(
-        model                  = sam,
-        points_per_side        = 32,
-        pred_iou_thresh        = 0.88,
-        stability_score_thresh = _MIN_STABILITY,
-        box_nms_thresh         = _NMS_IOU_THRESH,
-        min_mask_region_area   = args.min_area,
-    )
+        # ── Annotate ──────────────────────────────────────────────────────────
+        total_images    = 0
+        total_fallbacks = 0
+        total_labels    = 0
 
-    print(f"[SAM] Model loaded.  Starting annotation …\n")
-
-    # ── Create output directory structure ─────────────────────────────────────
-    for split in ("train", "val"):
-        (output_dir / "images" / split).mkdir(parents=True, exist_ok=True)
-        (output_dir / "labels" / split).mkdir(parents=True, exist_ok=True)
-
-    # ── Annotate ──────────────────────────────────────────────────────────────
-    total_images    = 0
-    total_fallbacks = 0
-    total_labels    = 0
-
-    for class_name, class_dir in class_dirs.items():
-        class_id = CLASS_MAP[class_name]
-        images   = sorted(
-            p for p in class_dir.iterdir()
-            if p.suffix.lower() in IMAGE_EXTS
-        )
-
-        if not images:
-            print(f"  [{class_name}] No images found — skipping.")
-            continue
-
-        # ── Per-class train/val split ──────────────────────────────────────────
-        random.shuffle(images)
-        n_val   = max(1, int(len(images) * args.val_split))
-        val_set = {p.name for p in images[:n_val]}
-        n_train = len(images) - n_val
-
-        print(
-            f"  [{class_name}]  class_id={class_id}  "
-            f"total={len(images)}  train={n_train}  val={n_val}"
-        )
-
-        for img_path in images:
-            split     = "val" if img_path.name in val_set else "train"
-            dst_img   = output_dir / "images" / split / img_path.name
-            dst_label = output_dir / "labels" / split / (img_path.stem + ".txt")
-
-            # ── Skip already processed ────────────────────────────────────────
-            if dst_label.exists() and not args.overwrite:
-                continue
-
-            # ── Copy image into output tree ───────────────────────────────────
-            shutil.copy2(img_path, dst_img)
-
-            # ── Load image ────────────────────────────────────────────────────
-            img_bgr = cv2.imread(str(img_path))
-            if img_bgr is None:
-                print(
-                    f"    [warn] Cannot read {img_path.name} — skipping",
-                    file=sys.stderr,
-                )
-                continue
-
-            img_rgb       = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-            img_h, img_w  = img_bgr.shape[:2]
-
-            # ── Run SAM ───────────────────────────────────────────────────────
-            try:
-                masks = mask_generator.generate(img_rgb)
-            except Exception as exc:
-                print(
-                    f"    [warn] SAM failed on {img_path.name}: {exc} — using fallback",
-                    file=sys.stderr,
-                )
-                masks = []
-
-            # ── Filter masks ──────────────────────────────────────────────────
-            valid_masks = filter_masks(
-                masks, img_h, img_w,
-                min_area       = args.min_area,
-                max_area_ratio = args.max_area_ratio,
+        for class_name, class_dir in class_dirs.items():
+            class_id = CLASS_MAP[class_name]
+            images   = sorted(
+                p for p in class_dir.iterdir()
+                if p.suffix.lower() in IMAGE_EXTS
             )
 
-            # ── Fallback: full-image bounding box ─────────────────────────────
-            # If SAM finds no valid region, record the entire image as one bbox.
-            # This ensures every image has at least one label, which YOLO needs.
-            if not valid_masks:
-                yolo_boxes = [(0.5, 0.5, 1.0, 1.0)]
-                total_fallbacks += 1
-            else:
-                yolo_boxes = [
-                    mask_to_yolo(m, img_h, img_w) for m in valid_masks
-                ]
+            if not images:
+                log.warning("[SAM] [%s] No images found — skipping.", class_name)
+                continue
 
-            write_labels(dst_label, class_id, yolo_boxes)
-            total_images += 1
-            total_labels += len(yolo_boxes)
+            # ── Per-class train/val split ──────────────────────────────────────
+            random.shuffle(images)
+            n_val   = max(1, int(len(images) * args.val_split))
+            val_set = {p.name for p in images[:n_val]}
+            n_train = len(images) - n_val
 
-    # ── Summary ───────────────────────────────────────────────────────────────
-    print(f"\n{'─'*60}")
-    print(f"[SAM] Annotation complete.")
-    print(f"      Images processed  : {total_images}")
-    print(f"      Total labels      : {total_labels}")
-    if total_fallbacks:
-        print(
-            f"      Fallback boxes    : {total_fallbacks}  "
-            "(full-image box — SAM found no valid regions)"
-        )
-    print(f"      Output            : {output_dir}")
-    print(f"\n[SAM] Next step:")
-    print(f"      python !training/train.py --data !training/data.yaml")
-    print(f"{'─'*60}\n")
+            log.info(
+                "[SAM] [%s]  class_id=%d  total=%d  train=%d  val=%d",
+                class_name, class_id, len(images), n_train, n_val,
+            )
+
+            for img_path in images:
+                split     = "val" if img_path.name in val_set else "train"
+                dst_img   = output_dir / "images" / split / img_path.name
+                dst_label = output_dir / "labels" / split / (img_path.stem + ".txt")
+
+                # ── Skip already processed ────────────────────────────────────
+                if dst_label.exists() and not args.overwrite:
+                    continue
+
+                # ── Copy image into output tree ───────────────────────────────
+                shutil.copy2(img_path, dst_img)
+
+                # ── Load image ────────────────────────────────────────────────
+                img_bgr = cv2.imread(str(img_path))
+                if img_bgr is None:
+                    log.warning("[SAM] Cannot read %s — skipping", img_path.name)
+                    continue
+
+                img_rgb       = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+                img_h, img_w  = img_bgr.shape[:2]
+
+                # ── Run SAM ───────────────────────────────────────────────────
+                try:
+                    masks = mask_generator.generate(img_rgb)
+                except Exception as exc:
+                    log.warning(
+                        "[SAM] SAM failed on %s: %s — using fallback", img_path.name, exc
+                    )
+                    masks = []
+
+                # ── Filter masks ──────────────────────────────────────────────
+                valid_masks = filter_masks(
+                    masks, img_h, img_w,
+                    min_area       = args.min_area,
+                    max_area_ratio = args.max_area_ratio,
+                )
+
+                # ── Fallback: full-image bounding box ─────────────────────────
+                # If SAM finds no valid region, record the entire image as one bbox.
+                # This ensures every image has at least one label, which YOLO needs.
+                if not valid_masks:
+                    yolo_boxes = [(0.5, 0.5, 1.0, 1.0)]
+                    total_fallbacks += 1
+                else:
+                    yolo_boxes = [
+                        mask_to_yolo(m, img_h, img_w) for m in valid_masks
+                    ]
+
+                write_labels(dst_label, class_id, yolo_boxes)
+                total_images += 1
+                total_labels += len(yolo_boxes)
+
+        # ── Summary ───────────────────────────────────────────────────────────
+        log.info("─" * 60)
+        log.info("[SAM] Annotation complete.")
+        log.info("[SAM] Images processed  : %d", total_images)
+        log.info("[SAM] Total labels      : %d", total_labels)
+        if total_fallbacks:
+            log.info(
+                "[SAM] Fallback boxes    : %d  (full-image box — SAM found no valid regions)",
+                total_fallbacks,
+            )
+        log.info("[SAM] Local output      : %s", output_dir)
+
+        # ── Upload to GCS (if output was a GCS path) ──────────────────────────
+        if output_is_gcs:
+            log.info("[SAM] Uploading output to GCS: %s", args.output)
+            upload_gcs_dir(output_dir, args.output)
+            log.info("[SAM] GCS upload complete.")
+
+        log.info("[SAM] Next step:")
+        log.info("[SAM]   python !training/train.py --data !training/data.yaml")
+        log.info("─" * 60)
+
+    finally:
+        # Clean up temp dir
+        shutil.rmtree(_tmpdir, ignore_errors=True)
 
 
 if __name__ == "__main__":

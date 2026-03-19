@@ -1,6 +1,6 @@
 # Chipset Defect Vision
 
-**YOLOv8 PCB defect detection** — 6 defect classes · SAM bootstrap · FastAPI · Glassmorphic UI · Docker · Fully offline
+**YOLOv8 PCB defect detection** — 6 defect classes · SAM bootstrap · FastAPI · Glassmorphic UI · Docker · Offline + Vertex AI
 
 ---
 
@@ -28,10 +28,13 @@ Every prediction returns a binary pass/fail decision plus per-defect bounding bo
 | **Binary verdict** | Every prediction returns `"GOOD"` or `"DEFECT"` |
 | **Zero-annotation pipeline** | SAM auto-labels; YOLO self-improves — no manual labeling needed |
 | **Offline-first** | Zero runtime network calls; all assets baked in at build time |
+| **GCS support** | All pipeline scripts read/write `gs://` paths transparently |
+| **Vertex AI ready** | Training container submittable as a Vertex AI Custom Job with one command |
 | **Image persistence** | Every incoming image saved to `incoming_data/` for audit + retraining |
-| **Docker ready** | Single-stage CPU build, non-root runtime, hard-fail weight verification |
+| **Docker ready** | Inference image (CPU) + training image (CUDA) — both non-root |
 | **Glassmorphic UI** | Drag-and-drop upload + live camera capture; zero JS frameworks |
 | **Health endpoint** | `GET /health` for container orchestration / load balancer probes |
+| **Structured logging** | All pipeline steps emit timestamped logs readable in Vertex AI / Cloud Logging |
 
 ---
 
@@ -142,10 +145,12 @@ Chipset-Defect-Vision/
 │   ├── styles.css
 │   └── script.js
 │
-├── Dockerfile                     ← single-stage CPU build, inference only
+├── Dockerfile                     ← inference image — CPU-only FastAPI server
+├── Dockerfile.training            ← training image — CUDA + SAM + GCS + Vertex AI
 ├── .dockerignore                  ← excludes training/, scripts/, data/, raw_data/
-├── requirements.txt               ← inference dependencies (FastAPI + ultralytics)
-├── requirements-sam.txt           ← dataset-creation dependencies (SAM + opencv)
+├── requirements.txt               ← inference deps (FastAPI + ultralytics + GCS)
+├── requirements-sam.txt           ← legacy SAM-only deps (superseded)
+├── requirements-training.txt      ← full training deps (SAM + YOLO + GCS)
 └── CHANGELOG.md
 ```
 
@@ -612,7 +617,146 @@ python !training/train.py \
 
 ---
 
-## Cloud Run Deployment
+## Cloud / Vertex AI Training
+
+The same pipeline that runs locally can run on Vertex AI Custom Training Jobs
+without any code changes.  All scripts accept `gs://` paths everywhere a local
+path is accepted.
+
+### Environment variables
+
+All three pipeline scripts read environment variables so they can be driven
+entirely without CLI flags — the standard Vertex AI pattern.
+
+| Variable | Script | Meaning |
+|---|---|---|
+| `SAM_INPUT_PATH` | `sam_auto_annotate.py` | Source dataset path (local or `gs://`) |
+| `SAM_OUTPUT_PATH` | `sam_auto_annotate.py` | Output YOLO dataset path |
+| `SAM_WEIGHTS_PATH` | `sam_auto_annotate.py` | SAM checkpoint path |
+| `YOLO_WEIGHTS_PATH` | `auto_label_with_yolo.py` | Trained model weights path |
+| `YOLO_DATA_PATH` | `auto_label_with_yolo.py` | Dataset root path |
+| `YOLO_BASE_MODEL` | `train.py` | Base YOLO model (e.g. `yolov8n.pt`) |
+| `AIP_TRAINING_DATA_URI` | `train.py` | Vertex AI standard — dataset GCS root |
+| `AIP_MODEL_DIR` | `train.py` | Vertex AI standard — model output GCS dir |
+
+### GCS path support
+
+Every `--input`, `--output`, `--data`, `--weights`, `--model`, and `--output-model`
+argument accepts a `gs://bucket/prefix` path transparently:
+
+```bash
+# Step 1 — SAM annotation reading/writing GCS
+python scripts/sam_auto_annotate.py \
+    --input       gs://my-bucket/dataset/ \
+    --output      gs://my-bucket/data/ \
+    --sam-weights gs://my-bucket/weights/sam_vit_b.pth \
+    --device      cuda
+
+# Step 2 — Train reading dataset from GCS, uploading model to GCS
+python !training/train.py \
+    --model        gs://my-bucket/weights/yolov8n.pt \
+    --data         gs://my-bucket/data/ \
+    --output-model gs://my-bucket/models/ \
+    --epochs 50 --device 0
+
+# Step 3 — YOLO re-labelling with GCS weights + dataset
+python scripts/auto_label_with_yolo.py \
+    --weights gs://my-bucket/models/best.pt \
+    --data    gs://my-bucket/data/
+```
+
+### Build the training image
+
+```bash
+docker build -f Dockerfile.training -t pcb-training .
+```
+
+### Local Docker run — CPU
+
+```bash
+docker run \
+    -v $(pwd)/weights:/app/weights \
+    -v $(pwd)/dataset:/app/dataset \
+    -v $(pwd)/data:/app/data \
+    pcb-training \
+    --model yolov8n.pt --data !training/data.yaml --epochs 50 --device cpu
+```
+
+### Local Docker run — GPU
+
+```bash
+docker run --gpus all \
+    -v $(pwd)/weights:/app/weights \
+    -v $(pwd)/dataset:/app/dataset \
+    -v $(pwd)/data:/app/data \
+    pcb-training \
+    --model yolov8n.pt --data !training/data.yaml --epochs 50 --device 0
+```
+
+### Full bootstrap in Docker
+
+```bash
+docker run --gpus all \
+    -v $(pwd)/weights:/app/weights \
+    -v $(pwd)/dataset:/app/dataset \
+    -v $(pwd)/data:/app/data \
+    --entrypoint bash pcb-training -c "
+      python scripts/sam_auto_annotate.py --device cuda && \
+      python !training/train.py --device 0 --epochs 50 && \
+      python scripts/auto_label_with_yolo.py --device cuda && \
+      python !training/train.py --device 0 --epochs 50
+    "
+```
+
+### Push to Artifact Registry
+
+```bash
+REGION=us-central1
+PROJECT=$(gcloud config get-value project)
+TRAIN_IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/chipset-defect-vision/training:latest"
+
+gcloud artifacts repositories create chipset-defect-vision \
+    --repository-format=docker --location=${REGION}
+gcloud auth configure-docker ${REGION}-docker.pkg.dev
+
+docker build -f Dockerfile.training -t ${TRAIN_IMAGE} .
+docker push ${TRAIN_IMAGE}
+```
+
+### Submit Vertex AI Custom Training Job
+
+```bash
+gcloud ai custom-jobs create \
+    --region=us-central1 \
+    --display-name=pcb-defect-train \
+    --worker-pool-spec=\
+machine-type=n1-standard-8,\
+accelerator-type=NVIDIA_TESLA_T4,\
+accelerator-count=1,\
+container-image-uri=${TRAIN_IMAGE} \
+    --args="\
+--model=gs://my-bucket/weights/yolov8n.pt,\
+--data=gs://my-bucket/data/,\
+--output-model=gs://my-bucket/models/,\
+--epochs=50,\
+--device=0"
+```
+
+Vertex AI injects `AIP_MODEL_DIR` automatically; the training script reads it
+as the output destination when `--output-model` is not passed explicitly.
+
+### Authentication
+
+| Environment | Auth method |
+|---|---|
+| Local Docker | `-e GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json` (volume-mounted) |
+| Vertex AI | Workload Identity (automatic — no credentials needed) |
+| Cloud Run | Attached service account (automatic) |
+| Local dev | `gcloud auth application-default login` |
+
+---
+
+## Cloud Run Deployment (Inference Server)
 
 ```bash
 REGION=us-central1
@@ -652,6 +796,10 @@ gcloud run deploy chipset-defect-vision \
 | Camera black screen | Serve over HTTPS or use `localhost` |
 | Docker build OOM | Add `--memory 6g` to `docker build` |
 | `CopyIgnoredFile` build error | Ensure `training/` is in `.dockerignore` and removed from Dockerfile `COPY` |
+| `google-cloud-storage not installed` | Activate training venv → `pip install -r requirements-training.txt` |
+| GCS permission denied | Ensure service account has `storage.objectViewer` + `storage.objectCreator` roles |
+| `[GCS] No files found at gs://…` | Verify bucket name, prefix, and that files exist with `gsutil ls gs://…` |
+| `AIP_TRAINING_DATA_URI` not picked up | Ensure you are running the updated `train.py`; older versions ignored env vars |
 
 ---
 

@@ -4,6 +4,176 @@ All significant changes to the project, in reverse-chronological order.
 
 ---
 
+## [Session 9] — 2026-03-19  Vertex AI + GCS Cloud Refactor
+
+### Overview
+Refactored the full SAM → YOLO → retraining pipeline to be cloud-ready for
+Vertex AI Custom Training Jobs.  All three pipeline scripts now accept
+`gs://bucket/prefix` paths transparently alongside local paths, emit structured
+logs readable in Cloud Logging, and can be driven entirely by environment
+variables (no interactive input).  A new training Docker image with CUDA + SAM +
+GCS support is provided.  Core logic is unchanged.
+
+---
+
+### `scripts/gcs_utils.py` — new
+
+GCS helper module shared by all pipeline scripts.
+
+| Function | Purpose |
+|----------|---------|
+| `is_gcs_path(path)` | Returns True for `gs://` URIs |
+| `parse_gcs_path(gcs_path)` | Splits `gs://bucket/prefix` → `(bucket, prefix)` |
+| `download_gcs_file(gcs_path, local)` | Download a single blob |
+| `download_gcs_dir(gcs_path, local_dir)` | Recursively download a GCS prefix |
+| `upload_gcs_file(local, gcs_path)` | Upload a single file |
+| `upload_gcs_dir(local_dir, gcs_path)` | Recursively upload a directory |
+| `resolve_input_path(path, tmp, subdir)` | Transparent local-or-GCS directory resolver |
+| `resolve_input_file(path, tmp, name)` | Transparent local-or-GCS file resolver |
+| `setup_logging(level)` | Configure Python logging for Vertex AI stdout capture |
+| `vertex_env()` | Read standard Vertex AI env vars (`AIP_MODEL_DIR`, etc.) |
+
+Requires `google-cloud-storage==2.16.0` (in `requirements-training.txt`).
+
+---
+
+### `scripts/sam_auto_annotate.py` — updated
+
+**GCS support added:**
+- `--input` accepts `gs://bucket/dataset/` (downloaded to temp dir before processing)
+- `--output` accepts `gs://bucket/data/` (staged locally, uploaded after annotation)
+- `--sam-weights` accepts `gs://bucket/weights/sam_vit_b.pth` (downloaded to temp)
+
+**Logging:**
+- All `print()` calls replaced with `logging.getLogger("sam_annotate")` calls
+- Progress logged at INFO: per-class stats, per-image warnings, summary
+- Timestamped format: `2026-03-19 12:34:56 [INFO] sam_annotate: …`
+
+**Environment variables (new):**
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `SAM_INPUT_PATH` | `dataset` | Source dataset root |
+| `SAM_OUTPUT_PATH` | `data` | YOLO dataset output root |
+| `SAM_WEIGHTS_PATH` | `weights/sam_vit_h.pth` | SAM checkpoint path |
+
+**New CLI arg:** `--log-level` (DEBUG / INFO / WARNING / ERROR)
+
+Core logic (mask filtering, NMS, YOLO format conversion, fallback box) is
+**unchanged**.
+
+---
+
+### `scripts/auto_label_with_yolo.py` — updated
+
+**GCS support added:**
+- `--weights` accepts `gs://bucket/models/best.pt`
+- `--data` accepts `gs://bucket/data/` (downloaded; updated labels uploaded back)
+
+**Logging:**
+- All `print()` calls replaced with `logging.getLogger("yolo_label")` calls
+- Progress counter every 50 images (Vertex AI friendly)
+
+**Environment variables (new):**
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `YOLO_WEIGHTS_PATH` | `weights/best.pt` | YOLO checkpoint path |
+| `YOLO_DATA_PATH` | `data` | Dataset root |
+
+**New CLI arg:** `--log-level`
+
+Core logic (image-to-label path mapping, YOLO inference, xyxy→cx/cy/w/h
+conversion, keep-undetected flag) is **unchanged**.
+
+---
+
+### `!training/train.py` — updated
+
+**GCS support added:**
+- `--data` now accepts `gs://bucket/data/` in addition to a local YAML path.
+  When a GCS path is given, the dataset is downloaded to a temp dir and a
+  `data.yaml` is auto-generated pointing to the local copy.
+- `--model` accepts `gs://bucket/weights/yolov8n.pt`
+- `--output-model` (new arg) accepts a local directory or `gs://bucket/models/`
+  — best.pt is uploaded there after training completes.
+
+**Vertex AI standard env vars:**
+| Variable | Overrides | Meaning |
+|----------|-----------|---------|
+| `AIP_TRAINING_DATA_URI` | `--data` | GCS dataset root (injected by Vertex AI) |
+| `AIP_MODEL_DIR` | `--output-model` | GCS model output dir (injected by Vertex AI) |
+| `YOLO_BASE_MODEL` | `--model` | Base model filename or GCS path |
+
+**Logging:**
+- All `print()` / `file=sys.stderr` calls replaced with `logging.getLogger("train")`
+- Summary metrics (mAP50, mAP50-95) emitted at INFO level after training
+
+**New functions:**
+- `build_data_yaml_for_gcs(local_data_dir)` — generates a temporary data.yaml
+  from a downloaded GCS dataset
+- `export_model(output_dest)` — copies or uploads best.pt to local dir / GCS
+
+Core logic (pre-flight checks, augmentation hyperparameters, AdamW optimiser,
+weight copy, validation) is **unchanged**.
+
+---
+
+### `Dockerfile.training` — new
+
+Training-specific Docker image for local GPU runs and Vertex AI.
+
+| Property | Value |
+|----------|-------|
+| Base image | `pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime` |
+| CUDA | 12.1 (falls back to CPU automatically) |
+| Extra system libs | `libsm6`, `libxext6`, `libxrender-dev`, `wget`, `git` |
+| Python deps | `requirements-training.txt` |
+| opencv swap | `opencv-python` → `opencv-python-headless` |
+| Includes | `scripts/`, `!training/`, `app/` |
+| Excludes | `weights/`, `data/`, `dataset/` (mount or use GCS) |
+| Entrypoint | `python !training/train.py` |
+| Runtime user | Non-root `appuser` |
+
+---
+
+### `requirements-training.txt` — new
+
+Unified training dependencies replacing the former `requirements-sam.txt` for
+cloud / Vertex AI use cases.
+
+| Package | Version | Purpose |
+|---------|---------|---------|
+| `ultralytics` | 8.2.18 | YOLOv8 training + inference |
+| `segment-anything` | 1.0 | SAM auto-annotation (Step 1) |
+| `opencv-python` | 4.9.0.80 | Image I/O (swapped to headless in Docker) |
+| `numpy` | 1.26.4 | Numerics |
+| `Pillow` | 10.3.0 | Image I/O |
+| `PyYAML` | 6.0.1 | YAML parsing |
+| `gcsfs` | 2024.3.1 | GCS filesystem interface |
+| `google-cloud-storage` | 2.16.0 | GCS blob download/upload |
+
+---
+
+### `requirements.txt` — updated
+
+Added GCS dependencies for optional inference-server GCS reads:
+- `gcsfs==2024.3.1`
+- `google-cloud-storage==2.16.0`
+
+(Remove these two lines when running fully air-gapped.)
+
+---
+
+### Reproducibility guarantee
+
+The same `Dockerfile.training` image produces the same results when run:
+- Locally with `docker run` (CPU or GPU)
+- On Vertex AI as a custom training job
+
+No code changes are required between environments.  Configuration is entirely
+via CLI args or standard environment variables.
+
+---
+
 ## [Session 8] — 2026-03-18  SAM + YOLO Bootstrap Pipeline (Zero Manual Annotation)
 
 ### Overview
