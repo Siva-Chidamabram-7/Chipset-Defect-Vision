@@ -4,6 +4,80 @@ All significant changes to the project, in reverse-chronological order.
 
 ---
 
+## [Session 11] — 2026-03-19  Production Cleanup + 7-Class Alignment
+
+### Overview
+Surgical cleanup pass to remove dead code, deprecated files, and legacy
+artifacts.  Aligned all class maps to the 7-class schema (Good = 6).
+No functional inference logic changed.
+
+---
+
+### Files deleted
+
+| File | Reason |
+|---|---|
+| `!training/prepare_dataset.py` | Deprecated stub — called `sys.exit(1)` immediately; dead code |
+| `!training/dataset.yaml` | Duplicate of `!training/data.yaml`; explicitly marked deprecated |
+| `scripts/generate_regions.py` | Deprecated stub — called `sys.exit(1)` immediately; dead code |
+| `scripts/annotate.py` | Legacy interactive OpenCV GUI tool; not part of the production pipeline |
+| `gh` | Empty file accidentally left in repo root; now gitignored |
+
+---
+
+### `app/main.py`
+
+- Removed unused `import base64` (base64 is used in `app/utils/image_utils.py`, not here)
+
+---
+
+### `app/model/predictor.py`
+
+- Updated module docstring: model priority note now explicitly states `best.pt` is required for production
+- `CLASS_NAMES`: added `6: "Good"` to match 7-class training schema
+- `COLORS`: added `"Good": (50, 205, 50)` (green) for bounding box annotation
+- Comment: clarified class list is 7 classes, not 6
+
+---
+
+### `!training/data.yaml`
+
+- `nc`: `6` → `7`
+- `names`: added `6: Good`
+
+Now consistent with:
+- `scripts/sam_to_yolo.py` CLASS_MAP
+- `training/data.yaml`
+- `app/model/predictor.py` CLASS_NAMES
+
+---
+
+### `.dockerignore`
+
+Added missing exclusions to keep inference build context clean:
+
+| Pattern added | Reason |
+|---|---|
+| `[!]training/` | Exclude the `!training/` directory from inference build context |
+| `requirements-training.txt` | Training-only deps; not needed in inference image |
+| `Dockerfile.training` | Training image definition; irrelevant to inference build |
+| `gh` | Stray empty binary in repo root |
+| `yolov8n.pt` | Base weights at repo root (not in `weights/`); not used by inference image |
+
+---
+
+### Critical issues resolved
+
+| Issue | Severity | Fix |
+|---|---|---|
+| Dead `import base64` in `main.py` | Low | Removed |
+| `Good` class missing from `predictor.py` | Medium | Added `CLASS_NAMES[6]` + `COLORS["Good"]` |
+| `Good` class missing from `!training/data.yaml` | Medium | Added `nc: 7`, `6: Good` |
+| 4 dead/deprecated files in repo | Medium | Deleted via `git rm` |
+| `[!]training/` not excluded from Docker build context | Low | Added to `.dockerignore` |
+
+---
+
 ## [Session 10] — 2026-03-19  Full Repository Sync + Dataset Commit
 
 ### Overview

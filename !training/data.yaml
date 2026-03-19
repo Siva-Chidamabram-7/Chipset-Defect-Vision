@@ -30,7 +30,7 @@ path: ../data          # dataset root — relative to !training/data.yaml
 train: images/train    # → <project_root>/data/images/train
 val:   images/val      # → <project_root>/data/images/val
 
-nc: 6
+nc: 7
 names:
   0: Missing_hole
   1: Mouse_bite
@@ -38,3 +38,4 @@ names:
   3: Short
   4: Spur
   5: Spurious_copper
+  6: Good

@@ -33,6 +33,7 @@ env
 
 # ── ML training code (local only — never runs inside the container) ───────────
 training/
+[!]training/
 
 # ── Dataset-creation scripts (SAM + annotation tools — GUI + heavy deps) ──────
 scripts/
@@ -43,8 +44,16 @@ raw_data/
 datasets/
 runs/
 
-# ── SAM / dev-only Python dependencies ────────────────────────────────────────
+# ── Training / SAM / dev-only Python dependencies ────────────────────────────
 requirements-sam.txt
+requirements-training.txt
+
+# ── Training image Dockerfile (not needed for inference build) ────────────────
+Dockerfile.training
+
+# ── Stray build artefacts ─────────────────────────────────────────────────────
+gh
+yolov8n.pt
 
 # ── Documentation ─────────────────────────────────────────────────────────────
 README.md

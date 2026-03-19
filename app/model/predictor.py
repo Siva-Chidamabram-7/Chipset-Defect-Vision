@@ -7,19 +7,20 @@ Wraps YOLOv8 inference for PCB solder defect detection.
    All weights must be present on disk before the server starts.
 
 Model priority (checked in order):
-  1. weights/best.pt    ← fine-tuned on the 6-class PCB defect dataset
-  2. weights/yolov8n.pt ← base weights baked into the Docker image at build time
+  1. weights/best.pt    ← fine-tuned on the 7-class PCB defect dataset (REQUIRED for production)
+  2. weights/yolov8n.pt ← base COCO weights (development fallback only — class names will not match)
 
 If neither file exists the predictor enters STUB mode: the server still starts
 and every prediction returns an annotated image with a visible warning overlay.
 
-Defect classes (from Roboflow dataset):
+Defect classes:
   0 → Missing_hole
   1 → Mouse_bite
   2 → Open_circuit
   3 → Short
   4 → Spur
   5 → Spurious_copper
+  6 → Good
 
 Decision logic:
   • No detections above CONF_THRESHOLD → status = "GOOD"
@@ -49,7 +50,7 @@ FINE_TUNED   = WEIGHTS_DIR / "best.pt"      # priority 1
 BASE_WEIGHTS = WEIGHTS_DIR / "yolov8n.pt"   # priority 2 — baked in at build time
 
 # ── Class config ──────────────────────────────────────────────────────────────
-# Matches the 6-class Roboflow dataset used for fine-tuning.
+# Must match the nc + names defined in !training/data.yaml exactly.
 CLASS_NAMES = {
     0: "Missing_hole",
     1: "Mouse_bite",
@@ -57,9 +58,10 @@ CLASS_NAMES = {
     3: "Short",
     4: "Spur",
     5: "Spurious_copper",
+    6: "Good",
 }
 
-# BGR colors — one distinct color per defect class
+# BGR colors — one distinct color per class
 COLORS = {
     "Missing_hole":    ( 68,  68, 239),   # red
     "Mouse_bite":      (  8, 179, 234),   # yellow
@@ -67,6 +69,7 @@ COLORS = {
     "Short":           (247,  85, 168),   # purple
     "Spur":            ( 22, 115, 249),   # orange
     "Spurious_copper": (166, 184,  20),   # teal
+    "Good":            ( 50, 205,  50),   # green
     "unknown":         (120, 120, 120),   # grey — base-model fallback
 }
 
