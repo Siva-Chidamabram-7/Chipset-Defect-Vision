@@ -327,6 +327,16 @@ def main() -> None:
                 continue
 
             img_h, img_w = img_bgr.shape[:2]
+
+            # ── Resize to max width 640 (aspect-ratio preserved) ──────────────
+            MAX_WIDTH = 640
+            if img_w > MAX_WIDTH:
+                scale     = MAX_WIDTH / img_w
+                new_w     = MAX_WIDTH
+                new_h     = int(img_h * scale)
+                img_bgr   = cv2.resize(img_bgr, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                img_h, img_w = new_h, new_w
+
             img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
             # ── Run SAM ───────────────────────────────────────────────────────
