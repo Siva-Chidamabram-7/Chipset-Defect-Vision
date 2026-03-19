@@ -5,13 +5,13 @@ gcs_utils.py — Google Cloud Storage helpers for the PCB defect pipeline
 Provides transparent local ↔ GCS path support for:
   • sam_auto_annotate.py    (Step 1)
   • auto_label_with_yolo.py (Step 3)
-  • !training/train.py      (Step 2 / Step 4)
+  • training/train.py        (Step 2 / Step 4)
 
 Usage pattern:
     from scripts.gcs_utils import is_gcs_path, download_gcs_dir, upload_gcs_dir
 
 All functions are no-ops / pass-throughs when given local paths.
-Requires: google-cloud-storage  (pip install -r requirements-training.txt)
+Requires: google-cloud-storage  (pip install -r training/requirements-training.txt)
 
 Authentication (pick one):
   • GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa-key.json  (service account)

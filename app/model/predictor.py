@@ -47,7 +47,7 @@ WEIGHTS_DIR = Path(__file__).parent.parent.parent / "weights"
 BEST_PT     = WEIGHTS_DIR / "best.pt"   # the ONE required model file
 
 # ── Class config ──────────────────────────────────────────────────────────────
-# Must match nc + names defined in !training/data.yaml exactly.
+# Must match nc + names defined in training/data.yaml exactly.
 CLASS_NAMES = {
     0: "Missing_hole",
     1: "Mouse_bite",
