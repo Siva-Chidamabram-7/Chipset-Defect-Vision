@@ -1,38 +1,4 @@
-"""
-train.py — Fine-tune YOLOv8 on the PCB solder defect dataset
-─────────────────────────────────────────────────────────────
-OFFLINE-FIRST: this script never downloads anything from the internet.
-  • The base model (yolov8n.pt) must already exist in weights/.
-  • The dataset must already be prepared under data/.
-
-Cloud / Vertex AI:
-  • Pass --data gs://bucket/data/ to load the dataset from GCS.
-  • Pass --model gs://bucket/weights/yolov8n.pt to load base weights from GCS.
-  • Pass --output-model gs://bucket/models/ to upload best.pt after training.
-  • Vertex AI standard env vars are read automatically:
-      AIP_TRAINING_DATA_URI  → overrides --data
-      AIP_MODEL_DIR          → overrides --output-model
-
-Usage (run from any directory — paths are always resolved from project root):
-
-    # Local training
-    python training/train.py
-    python training/train.py --epochs 30 --imgsz 640 --device cpu
-    python training/train.py --epochs 50 --batch 8  --device 0   # GPU
-
-    # GCS / Vertex AI
-    python training/train.py \\
-        --model        gs://my-bucket/weights/yolov8n.pt \\
-        --data         gs://my-bucket/data/ \\
-        --output-model gs://my-bucket/models/ \\
-        --epochs 50 --device 0
-
-Outputs:
-    weights/best.pt          ← best checkpoint (auto-copied after training)
-    weights/last.pt          ← last checkpoint
-    runs/detect/<name>/      ← full ultralytics run directory (plots, metrics)
-    <output-model>/best.pt   ← uploaded to GCS if --output-model is gs://…
-"""
+from __future__ import annotations
 
 import argparse
 import logging
@@ -40,407 +6,367 @@ import os
 import shutil
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
-# ── Project root — one level up from training/train.py ───────────────────────
-# Resolved at import time so all downstream path operations are absolute
-# regardless of the current working directory when the script is invoked.
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-WEIGHTS_DIR  = PROJECT_ROOT / "weights"
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-# ── sys.path — make training/scripts/ importable as "scripts.*" ──────────────
-# PROJECT_ROOT        → enables "training.scripts.*" if ever needed
-# PROJECT_ROOT/training → enables "scripts.gcs_utils" etc. (current style)
-# Both insertions are idempotent (guarded by the `not in` check).
-for _p in (str(PROJECT_ROOT), str(PROJECT_ROOT / "training")):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+import yaml
 
-# ── Logging ───────────────────────────────────────────────────────────────────
-log = logging.getLogger("train")
+from training.config import (
+    CLASS_NAMES,
+    DEFAULT_BASE_MODEL,
+    DEFAULT_HYPERPARAMETERS,
+    DEFAULT_LOCAL_DATA_CONFIG,
+    DEFAULT_RUN_NAME,
+    PROJECT_ROOT,
+    RUNS_DIR,
+    WEIGHTS_DIR,
+)
+from training.scripts.gcs_utils import (
+    download_gcs_dir,
+    download_gcs_file,
+    is_gcs_path,
+    setup_logging,
+    upload_gcs_file,
+)
 
+log = logging.getLogger("training.train")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Pre-flight checks
-# ─────────────────────────────────────────────────────────────────────────────
-
-def check_model_weights(model_arg: str) -> Path:
-    """
-    Resolve --model to an absolute Path that exists on disk.
-
-    Rules:
-      • GCS URI (gs://…)          → download to weights/<filename>; return local path.
-      • Bare filename (yolov8n.pt) → look in weights/ only.  No auto-download.
-      • Explicit relative/absolute path → resolve relative to PROJECT_ROOT.
-
-    Raises RuntimeError if the file cannot be found — never silently substitutes
-    a different model.
-    """
-    from scripts.gcs_utils import is_gcs_path, download_gcs_file
-
-    if is_gcs_path(model_arg):
-        local = WEIGHTS_DIR / Path(model_arg).name
-        WEIGHTS_DIR.mkdir(exist_ok=True)
-        log.info("[Train] Downloading model weights from GCS: %s", model_arg)
-        download_gcs_file(model_arg, local)
-        return local
-
-    candidate = Path(model_arg)
-
-    # Bare name with no directory component → weights/ only, no fallback
-    if candidate.parent == Path(".") and not candidate.is_absolute():
-        local = WEIGHTS_DIR / candidate
-        if local.exists():
-            return local
-        raise RuntimeError(
-            f"[Train] FATAL: base model weights not found.\n"
-            f"        Expected: {local}\n"
-            f"\n"
-            f"        To fix:\n"
-            f"          • Download yolov8n.pt on a machine with internet access\n"
-            f"            and copy it into weights/:\n"
-            f"              cp /path/to/yolov8n.pt {WEIGHTS_DIR}/yolov8n.pt\n"
-            f"          • Or pass a full path:  --model /absolute/path/to/yolov8n.pt\n"
-        )
-
-    # Explicit path — must exist as given (relative paths anchored to PROJECT_ROOT)
-    resolved = candidate if candidate.is_absolute() else PROJECT_ROOT / candidate
-    if not resolved.exists():
-        raise RuntimeError(
-            f"[Train] FATAL: model file not found: {resolved}"
-        )
-    return resolved
+DATASET_SPLITS = ("train", "val")
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 
-def check_dataset(data_yaml: str) -> Path:
-    """
-    Verify the dataset YAML exists and that both split directories contain
-    images and label files.
-
-    Validates:
-      • data.yaml file exists
-      • data/images/train/  exists and is non-empty
-      • data/images/val/    exists and is non-empty
-      • data/labels/train/  exists and is non-empty
-      • data/labels/val/    exists and is non-empty
-
-    Raises RuntimeError with the full list of problems if anything is missing.
-    Never calls sys.exit — raises so the caller can handle cleanup.
-    """
-    import yaml
-
-    yaml_path = Path(data_yaml)
-    if not yaml_path.is_absolute():
-        yaml_path = PROJECT_ROOT / yaml_path
-
-    if not yaml_path.exists():
-        raise RuntimeError(
-            f"[Train] FATAL: dataset YAML not found: {yaml_path}\n"
-            f"\n"
-            f"        To fix:\n"
-            f"          • Ensure training/data.yaml exists at the project root.\n"
-            f"          • Prepare the dataset under data/ using the SAM pipeline:\n"
-            f"              python training/scripts/sam_to_yolo.py\n"
-        )
-
-    with open(yaml_path) as f:
-        cfg = yaml.safe_load(f)
-
-    # dataset_root is resolved relative to the YAML file's own directory.
-    # For training/data.yaml with path: ../data → PROJECT_ROOT/data
-    dataset_root = (yaml_path.parent / cfg.get("path", ".")).resolve()
-
-    img_exts   = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-    label_exts = {".txt"}
-    errors     = []
-
-    for split_key in ("train", "val"):
-        # ── Image directory ────────────────────────────────────────────────────
-        img_rel  = cfg.get(split_key, "")           # e.g. "images/train"
-        img_dir  = (dataset_root / img_rel).resolve()
-
-        if not img_dir.exists():
-            errors.append(f"  • {split_key} image dir missing: {img_dir}")
-        else:
-            images = [p for p in img_dir.iterdir() if p.suffix.lower() in img_exts]
-            if not images:
-                errors.append(f"  • {split_key} image dir is empty: {img_dir}")
-
-        # ── Label directory ────────────────────────────────────────────────────
-        # Mirrors image dir: data/images/train → data/labels/train
-        label_dir = (dataset_root / "labels" / split_key).resolve()
-
-        if not label_dir.exists():
-            errors.append(f"  • {split_key} label dir missing: {label_dir}")
-        else:
-            labels = [p for p in label_dir.iterdir() if p.suffix.lower() in label_exts]
-            if not labels:
-                errors.append(f"  • {split_key} label dir is empty: {label_dir}")
-
-    if errors:
-        raise RuntimeError(
-            "[Train] FATAL: dataset is not ready.\n"
-            + "\n".join(errors)
-            + "\n\n"
-            "        To fix:\n"
-            "          1. Run the SAM annotation pipeline to generate labels:\n"
-            "               python training/scripts/sam_to_yolo.py\n"
-            "          2. Split images and labels into train/val under data/.\n"
-            "          3. Re-run training.\n"
-        )
-
-    return yaml_path
+@dataclass(frozen=True)
+class TrainConfig:
+    model: str
+    data: str
+    output_model: str
+    epochs: int
+    batch_size: int
+    learning_rate: float
+    image_size: int
+    optimizer: str
+    device: str
+    run_name: str
+    patience: int
 
 
-def build_data_yaml_for_gcs(local_data_dir: Path) -> Path:
-    """
-    Write a temporary data.yaml pointing to the locally-downloaded GCS dataset.
-    Returns the path to the generated YAML file.
-
-    Class schema must exactly mirror training/data.yaml (nc=7, 7 named classes).
-    """
-    import yaml
-
-    yaml_path = local_data_dir / "data.yaml"
-    cfg = {
-        "path":  str(local_data_dir),
-        "train": "images/train",
-        "val":   "images/val",
-        "nc":    7,
-        "names": {
-            0: "Missing_hole",
-            1: "Mouse_bite",
-            2: "Open_circuit",
-            3: "Short",
-            4: "Spur",
-            5: "Spurious_copper",
-            6: "Good",
-        },
-    }
-    with open(yaml_path, "w") as f:
-        yaml.dump(cfg, f, default_flow_style=False)
-    log.info("[Train] Generated data.yaml at %s", yaml_path)
-    return yaml_path
+def _env_or_default(name: str, default: str) -> str:
+    return os.environ.get(name, default)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CLI
-# ─────────────────────────────────────────────────────────────────────────────
-
-def parse_args():
-    p = argparse.ArgumentParser(
-        description="YOLOv8 PCB solder defect — offline / cloud training",
+def parse_args() -> TrainConfig:
+    parser = argparse.ArgumentParser(
+        description="Train YOLOv8 locally or on Vertex AI with local or GCS datasets.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument(
+    parser.add_argument(
         "--model",
-        default=None,
-        help=(
-            "Base model weights.  Bare filenames (e.g. yolov8n.pt) are looked "
-            "up in weights/ only — no auto-download.  Pass a full path or gs:// URI."
-        ),
+        default=_env_or_default("YOLO_BASE_MODEL", DEFAULT_BASE_MODEL),
+        help="Base model checkpoint path. Supports local files or gs:// URIs.",
     )
-    p.add_argument(
+    parser.add_argument(
         "--data",
-        default=None,
-        help=(
-            "Path to dataset YAML (local) OR dataset root directory on GCS "
-            "(gs://bucket/data/).  When a GCS path is given the dataset is "
-            "downloaded and a data.yaml is auto-generated."
+        default=_env_or_default(
+            "TRAIN_DATA_PATH",
+            _env_or_default("AIP_TRAINING_DATA_URI", str(DEFAULT_LOCAL_DATA_CONFIG)),
         ),
+        help="Dataset YAML path, dataset directory, or gs:// dataset prefix.",
     )
-    p.add_argument(
+    parser.add_argument(
         "--output-model",
-        default=None,
-        help=(
-            "Destination for the trained best.pt.  "
-            "Accepts a local directory or gs://bucket/models/.  "
-            "When set, best.pt is copied/uploaded here after training."
+        default=_env_or_default("TRAIN_OUTPUT_MODEL", _env_or_default("AIP_MODEL_DIR", "")),
+        help="Where to copy the trained best.pt. Supports local directories or gs:// prefixes.",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=int(_env_or_default("TRAIN_EPOCHS", str(DEFAULT_HYPERPARAMETERS["epochs"]))),
+    )
+    parser.add_argument(
+        "--batch",
+        dest="batch_size",
+        type=int,
+        default=int(_env_or_default("TRAIN_BATCH_SIZE", str(DEFAULT_HYPERPARAMETERS["batch_size"]))),
+    )
+    parser.add_argument(
+        "--lr",
+        dest="learning_rate",
+        type=float,
+        default=float(
+            _env_or_default("TRAIN_LEARNING_RATE", str(DEFAULT_HYPERPARAMETERS["learning_rate"]))
         ),
+        help="Initial learning rate (YOLO lr0).",
     )
-    p.add_argument("--epochs",   type=int,   default=50)
-    p.add_argument("--imgsz",    type=int,   default=640)
-    p.add_argument("--batch",    type=int,   default=16)
-    p.add_argument(
+    parser.add_argument(
+        "--imgsz",
+        "--image-size",
+        dest="image_size",
+        type=int,
+        default=int(_env_or_default("TRAIN_IMAGE_SIZE", str(DEFAULT_HYPERPARAMETERS["image_size"]))),
+        help="Training image size.",
+    )
+    parser.add_argument(
+        "--optimizer",
+        default=_env_or_default("TRAIN_OPTIMIZER", str(DEFAULT_HYPERPARAMETERS["optimizer"])),
+        help="YOLO optimizer name such as AdamW, SGD, or Adam.",
+    )
+    parser.add_argument(
         "--device",
-        default="cpu",
-        help="Training device: 'cpu', '0' (first GPU), '0,1' (multi-GPU), 'mps'.",
+        default=_env_or_default("TRAIN_DEVICE", str(DEFAULT_HYPERPARAMETERS["device"])),
+        help="Training device such as cpu, cuda, cuda:0, or 0.",
     )
-    p.add_argument("--name",     default="pcb_solder_v1", help="Run name.")
-    p.add_argument("--patience", type=int,   default=20,  help="Early-stop patience.")
-    p.add_argument(
-        "--log-level", default="INFO",
+    parser.add_argument(
+        "--name",
+        dest="run_name",
+        default=_env_or_default("TRAIN_RUN_NAME", DEFAULT_RUN_NAME),
+        help="Training run name under runs/detect/.",
+    )
+    parser.add_argument(
+        "--patience",
+        type=int,
+        default=int(_env_or_default("TRAIN_PATIENCE", str(DEFAULT_HYPERPARAMETERS["patience"]))),
+        help="Early stopping patience.",
+    )
+    parser.add_argument(
+        "--log-level",
+        default=_env_or_default("TRAIN_LOG_LEVEL", "INFO"),
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Logging verbosity.",
     )
-    args = p.parse_args()
 
-    # ── Environment-variable overrides (Vertex AI standard + custom) ──────────
-    # Priority: CLI arg > env var > hard-coded default (absolute path)
-    # Default data path is always absolute so training works from any directory.
-    _default_data = str(PROJECT_ROOT / "training" / "data.yaml")
-    args.data         = args.data         or os.environ.get("AIP_TRAINING_DATA_URI", _default_data)
-    args.output_model = args.output_model or os.environ.get("AIP_MODEL_DIR",         "")
-    args.model        = args.model        or os.environ.get("YOLO_BASE_MODEL",       "yolov8n.pt")
+    args = parser.parse_args()
+    setup_logging(level=getattr(logging, args.log_level.upper(), logging.INFO))
+    return TrainConfig(
+        model=args.model,
+        data=args.data,
+        output_model=args.output_model,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
+        image_size=args.image_size,
+        optimizer=args.optimizer,
+        device=args.device,
+        run_name=args.run_name,
+        patience=args.patience,
+    )
 
-    return args
+
+def resolve_path(path_value: str) -> Path:
+    candidate = Path(path_value)
+    return candidate if candidate.is_absolute() else PROJECT_ROOT / candidate
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Training
-# ─────────────────────────────────────────────────────────────────────────────
+def generate_data_yaml(dataset_root: Path, output_path: Path) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(
+            {
+                "path": str(dataset_root),
+                "train": "images/train",
+                "val": "images/val",
+                "nc": len(CLASS_NAMES),
+                "names": CLASS_NAMES,
+            },
+            handle,
+            sort_keys=False,
+        )
+    return output_path
 
-def train(args, model_path: Path, data_yaml: Path):
+
+def validate_dataset_yaml(data_yaml_path: Path) -> Path:
+    if not data_yaml_path.exists():
+        raise RuntimeError(f"[Train] Dataset config not found: {data_yaml_path}")
+
+    with data_yaml_path.open("r", encoding="utf-8") as handle:
+        config = yaml.safe_load(handle) or {}
+
+    dataset_root = Path(config.get("path", "."))
+    if not dataset_root.is_absolute():
+        dataset_root = (data_yaml_path.parent / dataset_root).resolve()
+
+    errors: list[str] = []
+    for split in DATASET_SPLITS:
+        image_dir = dataset_root / "images" / split
+        label_dir = dataset_root / "labels" / split
+
+        if not image_dir.exists():
+            errors.append(f"Missing image directory: {image_dir}")
+        else:
+            image_count = sum(
+                1 for file_path in image_dir.iterdir() if file_path.suffix.lower() in IMAGE_EXTENSIONS
+            )
+            if image_count == 0:
+                errors.append(f"No images found in: {image_dir}")
+
+        if not label_dir.exists():
+            errors.append(f"Missing label directory: {label_dir}")
+
+    if errors:
+        raise RuntimeError("[Train] Dataset validation failed:\n" + "\n".join(errors))
+
+    return data_yaml_path
+
+
+def stage_dataset(data_source: str, workspace: Path) -> Path:
+    if is_gcs_path(data_source):
+        dataset_root = workspace / "dataset"
+        dataset_root.mkdir(parents=True, exist_ok=True)
+        file_count = download_gcs_dir(data_source, dataset_root)
+        if file_count == 0:
+            raise RuntimeError(f"[Train] No dataset files found at {data_source}")
+
+        explicit_yaml = dataset_root / "data.yaml"
+        if explicit_yaml.exists():
+            return validate_dataset_yaml(explicit_yaml)
+
+        generated_yaml = workspace / "generated-data.yaml"
+        return validate_dataset_yaml(generate_data_yaml(dataset_root, generated_yaml))
+
+    local_path = resolve_path(data_source)
+    if local_path.is_file():
+        return validate_dataset_yaml(local_path)
+
+    if local_path.is_dir():
+        explicit_yaml = local_path / "data.yaml"
+        if explicit_yaml.exists():
+            return validate_dataset_yaml(explicit_yaml)
+
+        generated_yaml = workspace / "generated-data.yaml"
+        return validate_dataset_yaml(generate_data_yaml(local_path, generated_yaml))
+
+    raise RuntimeError(f"[Train] Unsupported dataset source: {data_source}")
+
+
+def stage_model(model_source: str, workspace: Path) -> Path:
+    if is_gcs_path(model_source):
+        local_model_path = workspace / Path(model_source).name
+        download_gcs_file(model_source, local_model_path)
+        return local_model_path
+
+    local_model_path = resolve_path(model_source)
+    if not local_model_path.exists():
+        # Allow bare Ultralytics model names like yolov8n.pt so the trainer
+        # can resolve or download them at runtime when desired.
+        candidate = Path(model_source)
+        if candidate.parent == Path(".") and candidate.suffix == ".pt":
+            return candidate
+        raise RuntimeError(
+            "[Train] Base model checkpoint not found.\n"
+            f"Expected: {local_model_path}\n"
+            "Provide a valid local file, a gs:// checkpoint URI, or a model name like yolov8n.pt."
+        )
+    return local_model_path
+
+
+def train_model(config: TrainConfig, model_path: Path, data_yaml_path: Path) -> Path:
     from ultralytics import YOLO
 
-    log.info("[Train] Base model  : %s", model_path)
-    log.info("[Train] Dataset YAML: %s", data_yaml)
+    log.info("Starting training")
+    log.info("Model checkpoint : %s", model_path)
+    log.info("Dataset config   : %s", data_yaml_path)
     log.info(
-        "[Train] epochs=%d  imgsz=%d  batch=%d  device=%s",
-        args.epochs, args.imgsz, args.batch, args.device,
+        "Hyperparameters  : epochs=%d batch=%d lr=%s imgsz=%d optimizer=%s device=%s",
+        config.epochs,
+        config.batch_size,
+        config.learning_rate,
+        config.image_size,
+        config.optimizer,
+        config.device,
     )
 
     model = YOLO(str(model_path))
-
     model.train(
-        data     = str(data_yaml),
-        epochs   = args.epochs,
-        imgsz    = args.imgsz,
-        batch    = args.batch,
-        device   = args.device,
-        name     = args.name,
-        patience = args.patience,
-        # ── Augmentation ──────────────────────────────────────────────────────
-        hsv_h=0.015, hsv_s=0.7, hsv_v=0.4,
-        flipud=0.1,  fliplr=0.5,
-        mosaic=1.0,  mixup=0.1,
-        # ── Optimiser ─────────────────────────────────────────────────────────
-        optimizer="AdamW",
-        lr0=0.001, lrf=0.01,
-        warmup_epochs=3,
-        # ── Artefacts ─────────────────────────────────────────────────────────
-        plots=True, save=True, save_period=10,
+        data=str(data_yaml_path),
+        epochs=config.epochs,
+        batch=config.batch_size,
+        imgsz=config.image_size,
+        lr0=config.learning_rate,
+        optimizer=config.optimizer,
+        device=config.device,
+        name=config.run_name,
+        patience=config.patience,
+        project=str(RUNS_DIR / "detect"),
+        save=True,
+        plots=True,
     )
 
+    trainer = getattr(model, "trainer", None)
+    save_dir = getattr(trainer, "save_dir", None)
+    if save_dir is None:
+        raise RuntimeError("[Train] Unable to determine YOLO run directory after training.")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Post-training steps
-# ─────────────────────────────────────────────────────────────────────────────
-
-def copy_weights(run_name: str) -> None:
-    """Copy best.pt and last.pt from the ultralytics run directory → weights/."""
-    runs_dir = PROJECT_ROOT / "runs" / "detect" / run_name / "weights"
-    WEIGHTS_DIR.mkdir(exist_ok=True)
-
-    for fname in ("best.pt", "last.pt"):
-        src = runs_dir / fname
-        if src.exists():
-            dst = WEIGHTS_DIR / fname
-            shutil.copy2(src, dst)
-            log.info("[Train] Copied %s → %s", src, dst)
-        else:
-            log.warning("[Train] %s not found — skipping copy.", src)
+    run_dir = Path(save_dir)
+    if not run_dir.exists():
+        raise RuntimeError(f"[Train] YOLO run directory not found: {run_dir}")
+    return run_dir
 
 
-def export_model(output_dest: str) -> None:
-    """
-    Copy / upload weights/best.pt to the configured output destination.
+def copy_training_outputs(run_dir: Path) -> Path:
+    weights_dir = run_dir / "weights"
+    best_checkpoint = weights_dir / "best.pt"
+    last_checkpoint = weights_dir / "last.pt"
 
-    Accepts:
-      • A local directory path → copies best.pt into that directory.
-      • A GCS URI (gs://…)    → uploads best.pt to that GCS prefix.
-    """
-    from scripts.gcs_utils import is_gcs_path, upload_gcs_file
+    if not best_checkpoint.exists():
+        raise RuntimeError(f"[Train] Training finished without best.pt in {weights_dir}")
 
-    best = WEIGHTS_DIR / "best.pt"
-    if not best.exists():
-        raise RuntimeError(
-            f"[Train] FATAL: weights/best.pt not found after training.\n"
-            f"        Expected: {best}\n"
-            f"        Training may have failed — check run logs."
-        )
+    WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(best_checkpoint, WEIGHTS_DIR / "best.pt")
 
-    if is_gcs_path(output_dest):
-        dest_blob = output_dest.rstrip("/") + "/best.pt"
-        log.info("[Train] Uploading best.pt → %s", dest_blob)
-        upload_gcs_file(best, dest_blob)
-        log.info("[Train] Model upload complete.")
-    else:
-        dest_dir = Path(output_dest)
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        dst = dest_dir / "best.pt"
-        shutil.copy2(best, dst)
-        log.info("[Train] Copied best.pt → %s", dst)
+    if last_checkpoint.exists():
+        shutil.copy2(last_checkpoint, WEIGHTS_DIR / "last.pt")
+
+    return WEIGHTS_DIR / "best.pt"
 
 
-def validate(weights_path: Path, data_yaml: Path, imgsz: int, device: str) -> None:
+def validate_model(best_checkpoint: Path, data_yaml_path: Path, image_size: int, device: str) -> None:
     from ultralytics import YOLO
 
-    log.info("[Validate] Running validation with %s ...", weights_path.name)
-    model   = YOLO(str(weights_path))
-    metrics = model.val(data=str(data_yaml), imgsz=imgsz, device=device)
-    log.info("[Validate] mAP50:    %.4f", metrics.box.map50)
-    log.info("[Validate] mAP50-95: %.4f", metrics.box.map)
+    model = YOLO(str(best_checkpoint))
+    metrics = model.val(data=str(data_yaml_path), imgsz=image_size, device=device)
+    log.info("Validation mAP50    : %.4f", metrics.box.map50)
+    log.info("Validation mAP50-95 : %.4f", metrics.box.map)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Entry point
-# ─────────────────────────────────────────────────────────────────────────────
+def export_model(best_checkpoint: Path, output_model: str) -> None:
+    if not output_model:
+        return
+
+    if is_gcs_path(output_model):
+        destination = output_model.rstrip("/") + "/best.pt"
+        upload_gcs_file(best_checkpoint, destination)
+        log.info("Uploaded best checkpoint to %s", destination)
+        return
+
+    output_dir = resolve_path(output_model)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    destination = output_dir / "best.pt"
+    shutil.copy2(best_checkpoint, destination)
+    log.info("Copied best checkpoint to %s", destination)
+
+
+def main() -> int:
+    config = parse_args()
+    log.info("Project root       : %s", PROJECT_ROOT)
+    log.info("Training data      : %s", config.data)
+    log.info("Base model         : %s", config.model)
+    log.info("Output model       : %s", config.output_model or "(not exported)")
+
+    with tempfile.TemporaryDirectory(prefix="chipset-train-") as tmp_dir:
+        workspace = Path(tmp_dir)
+        data_yaml_path = stage_dataset(config.data, workspace)
+        model_path = stage_model(config.model, workspace)
+        run_dir = train_model(config, model_path, data_yaml_path)
+        best_checkpoint = copy_training_outputs(run_dir)
+        validate_model(best_checkpoint, data_yaml_path, config.image_size, config.device)
+        export_model(best_checkpoint, config.output_model)
+        log.info("Training complete. Best checkpoint: %s", best_checkpoint)
+
+    return 0
+
 
 if __name__ == "__main__":
-    args = parse_args()
-
-    # Setup logging before any other output
-    from scripts.gcs_utils import setup_logging, is_gcs_path, download_gcs_dir
-    setup_logging(level=getattr(logging, args.log_level.upper(), logging.INFO))
-
-    log.info("=" * 60)
-    log.info("[Train] YOLOv8 PCB Defect Training — starting")
-    log.info("[Train] Project root  : %s", PROJECT_ROOT)
-    log.info("[Train] Model         : %s", args.model)
-    log.info("[Train] Data          : %s", args.data)
-    log.info("[Train] Output model  : %s", args.output_model or "(local only)")
-    log.info("[Train] Epochs        : %d", args.epochs)
-    log.info("[Train] Device        : %s", args.device)
-    log.info("=" * 60)
-
-    # ── Handle GCS dataset ────────────────────────────────────────────────────
-    _tmpdir         = None
-    local_data_yaml = args.data
-
-    if is_gcs_path(args.data):
-        log.info("[Train] Downloading dataset from GCS: %s", args.data)
-        _tmpdir    = tempfile.mkdtemp(prefix="pcb_train_")
-        local_data = Path(_tmpdir) / "data"
-        local_data.mkdir()
-        download_gcs_dir(args.data, local_data)
-        local_data_yaml = str(build_data_yaml_for_gcs(local_data))
-        log.info("[Train] Dataset downloaded to: %s", local_data)
-
-    try:
-        # Pre-flight: fail early and loudly if anything is missing.
-        model_path = check_model_weights(args.model)
-        data_yaml  = check_dataset(local_data_yaml)
-
-        log.info("[Train] Pre-flight checks passed — starting training ...")
-        train(args, model_path, data_yaml)
-        copy_weights(args.name)
-
-        best = WEIGHTS_DIR / "best.pt"
-        if not best.exists():
-            raise RuntimeError(
-                f"[Train] FATAL: training completed but best.pt was not produced.\n"
-                f"        Expected: {best}\n"
-                f"        Check ultralytics run logs for training errors."
-            )
-
-        validate(best, data_yaml, args.imgsz, args.device)
-
-        if args.output_model:
-            export_model(args.output_model)
-
-        log.info("[Train] Done.  Best weights: %s", best)
-
-    finally:
-        if _tmpdir:
-            shutil.rmtree(_tmpdir, ignore_errors=True)
+    raise SystemExit(main())

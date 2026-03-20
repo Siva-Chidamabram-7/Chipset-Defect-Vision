@@ -15,20 +15,34 @@ env/
 
 # ── Dataset files ─────────────────────────────────────────────────────────────
 # Ignore actual image and label files (large, machine-local).
-# We ignore by EXTENSION, not by directory, so that .gitkeep placeholder files
-# inside data/ and raw_data/ are still tracked — preserving the folder structure
-# in git without committing any dataset content.
+# We ignore by EXTENSION so that .gitkeep placeholder files are still tracked —
+# preserving the directory scaffold in git without committing dataset content.
+
+# Generated YOLO dataset — new location (training/data/)
+training/data/images/**/*.jpg
+training/data/images/**/*.jpeg
+training/data/images/**/*.png
+training/data/images/**/*.bmp
+training/data/images/**/*.webp
+training/data/labels/**/*.txt
+training/data/**/*.cache
+
+# Generated YOLO dataset — legacy location (data/ at project root)
 data/images/**/*.jpg
 data/images/**/*.jpeg
 data/images/**/*.png
 data/images/**/*.bmp
 data/images/**/*.webp
 data/labels/**/*.txt
-raw_data/images/**/*.jpg
-raw_data/images/**/*.jpeg
-raw_data/images/**/*.png
-raw_data/images/**/*.bmp
-raw_data/images/**/*.webp
+data/**/*.cache
+
+# Raw source images (raw_data/ — class-labelled subdirectories)
+raw_data/**/*.jpg
+raw_data/**/*.jpeg
+raw_data/**/*.png
+raw_data/**/*.bmp
+raw_data/**/*.webp
+raw_data/**/*.tiff
 raw_data/labels/**/*.txt
 
 # ── Model weights ─────────────────────────────────────────────────────────────

@@ -1,53 +1,22 @@
-"""
-SolderDefectPredictor
-─────────────────────
-Wraps YOLOv8 inference for PCB solder defect detection.
+from __future__ import annotations
 
-⚠  OFFLINE-FIRST: this module NEVER attempts a network call.
-   All weights must be present on disk before the server starts.
-
-Required weight file:
-  weights/best.pt  ← fine-tuned on the 7-class PCB defect dataset (MANDATORY)
-
-If weights/best.pt is missing the server will REFUSE TO START with a clear
-RuntimeError.  There is no silent fallback — every deployment must ship the
-correct model.
-
-Defect classes:
-  0 → Missing_hole
-  1 → Mouse_bite
-  2 → Open_circuit
-  3 → Short
-  4 → Spur
-  5 → Spurious_copper
-  6 → Good
-
-Decision logic:
-  • No detections above CONF_THRESHOLD → status = "GOOD"
-  • Any detection above CONF_THRESHOLD → status = "DEFECT"
-"""
-
-import sys
 from pathlib import Path
 from typing import Any
 
 import cv2
 import numpy as np
 
-# ── ultralytics import ────────────────────────────────────────────────────────
+from app.config import CONFIDENCE_THRESHOLD, MODEL_NAME, MODEL_PATH
+from app.utils.image_utils import encode_image_to_base64
+
 try:
     from ultralytics import YOLO
-    _YOLO_AVAILABLE = True
+
+    YOLO_AVAILABLE = True
 except ImportError:
-    _YOLO_AVAILABLE = False
+    YOLO_AVAILABLE = False
 
-# ── Weight paths ──────────────────────────────────────────────────────────────
-# LOCAL only — no network fallback exists, by design.
-WEIGHTS_DIR = Path(__file__).parent.parent.parent / "weights"
-BEST_PT     = WEIGHTS_DIR / "best.pt"   # the ONE required model file
 
-# ── Class config ──────────────────────────────────────────────────────────────
-# Must match nc + names defined in training/data.yaml exactly.
 CLASS_NAMES = {
     0: "Missing_hole",
     1: "Mouse_bite",
@@ -58,144 +27,136 @@ CLASS_NAMES = {
     6: "Good",
 }
 
-# BGR colors — one distinct color per class
 COLORS = {
-    "Missing_hole":    ( 68,  68, 239),   # red
-    "Mouse_bite":      (  8, 179, 234),   # yellow
-    "Open_circuit":    (246, 130,  59),   # blue
-    "Short":           (247,  85, 168),   # purple
-    "Spur":            ( 22, 115, 249),   # orange
-    "Spurious_copper": (166, 184,  20),   # teal
-    "Good":            ( 50, 205,  50),   # green
+    "Missing_hole": (68, 68, 239),
+    "Mouse_bite": (8, 179, 234),
+    "Open_circuit": (246, 130, 59),
+    "Short": (247, 85, 168),
+    "Spur": (22, 115, 249),
+    "Spurious_copper": (166, 184, 20),
+    "Good": (50, 205, 50),
 }
 
-# Detections below this confidence are ignored entirely.
-CONF_THRESHOLD = 0.30
 
-
-# ── Predictor ─────────────────────────────────────────────────────────────────
 class SolderDefectPredictor:
-    def __init__(self):
+    """Offline-only YOLO predictor that hard-fails unless weights/best.pt exists."""
+
+    def __init__(
+        self,
+        model_path: Path | None = None,
+        confidence_threshold: float = CONFIDENCE_THRESHOLD,
+    ) -> None:
+        self._model_path = model_path or MODEL_PATH
+        self._confidence_threshold = confidence_threshold
         self._model = None
         self._load_model()
 
-    # ── Model loading ─────────────────────────────────────────────────────────
-    def _load_model(self):
-        """
-        Load weights/best.pt from local disk.
-
-        Raises RuntimeError if:
-          - ultralytics is not installed
-          - weights/best.pt does not exist
-
-        There is NO silent fallback.  A missing model is always a hard error.
-        """
-        if not _YOLO_AVAILABLE:
+    def _load_model(self) -> None:
+        if not YOLO_AVAILABLE:
             raise RuntimeError(
-                "[Predictor] FATAL: ultralytics is not installed.\n"
-                "            Cannot run inference without the ultralytics package."
+                "[Predictor] FATAL: ultralytics is not installed. "
+                "Inference cannot start without it."
             )
 
-        if not BEST_PT.exists():
+        if not self._model_path.exists():
             raise RuntimeError(
-                f"[Predictor] FATAL: trained model not found.\n"
-                f"            Expected: {BEST_PT}\n"
-                f"\n"
-                f"            To fix:\n"
-                f"              • Run training and copy best.pt → weights/best.pt, then\n"
-                f"                rebuild the Docker image:  docker build -t chipset-defect-vision .\n"
-                f"              • Or mount the file at runtime:\n"
-                f"                docker run -v $(pwd)/weights/best.pt:/app/weights/best.pt ...\n"
+                "[Predictor] FATAL: trained model not found.\n"
+                f"Expected: {self._model_path}\n"
+                "The inference service only supports weights/best.pt."
             )
 
-        print(f"[Predictor] Loading trained model: {BEST_PT}", flush=True)
-        self._model = YOLO(str(BEST_PT))
-        print(f"[Predictor] Model ready — classes: {list(CLASS_NAMES.values())}", flush=True)
+        self._model = YOLO(str(self._model_path))
 
     def is_ready(self) -> bool:
-        """True when the model is loaded and can run inference."""
         return self._model is not None
 
-    # ── Inference ─────────────────────────────────────────────────────────────
-    def predict(self, image_path: str) -> dict[str, Any]:
-        """
-        Run YOLOv8 inference and return a structured result.
-
-        Response schema:
-          {
-            "status":     "GOOD" | "DEFECT",
-            "detections": [{"class": str, "confidence": float, "bbox": [x1,y1,x2,y2]}],
-            "image":      <base64-encoded annotated JPEG>,
-            "model":      "best.pt"
-          }
-
-        Decision rule:
-          • No detections → "GOOD"
-          • Any detection  → "DEFECT"
-        """
-        img_bgr = cv2.imread(image_path)
-        if img_bgr is None:
-            raise ValueError(f"Cannot read image: {image_path}")
-
+    def predict(self, image_bgr: np.ndarray) -> dict[str, Any]:
         results = self._model.predict(
-            source=image_path,
-            conf=CONF_THRESHOLD,
+            source=image_bgr,
+            conf=self._confidence_threshold,
             save=False,
             verbose=False,
         )[0]
 
-        detections = []
-        annotated  = img_bgr.copy()
+        detections: list[dict[str, Any]] = []
+        annotated = image_bgr.copy()
 
         if results.boxes is not None:
             for box in results.boxes:
                 x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-                conf       = float(box.conf[0])
-                cls        = int(box.cls[0])
-                class_name = CLASS_NAMES.get(cls, "unknown")
-                color      = COLORS.get(class_name, (120, 120, 120))
-                self._draw_box(annotated, x1, y1, x2, y2, class_name, conf, color)
-                detections.append({
-                    "class":      class_name,
-                    "confidence": round(conf, 4),
-                    "bbox":       [x1, y1, x2, y2],
-                })
+                confidence = round(float(box.conf[0]), 4)
+                class_id = int(box.cls[0])
+                label = CLASS_NAMES.get(class_id, "unknown")
+                color = COLORS.get(label, (120, 120, 120))
 
-        # ── Binary decision ───────────────────────────────────────────────────
-        status = "GOOD" if not detections else "DEFECT"
+                self._draw_box(annotated, x1, y1, x2, y2, label, confidence, color)
+                detections.append(
+                    {
+                        "class": label,
+                        "label": label,
+                        "confidence": confidence,
+                        "bbox": [x1, y1, x2, y2],
+                    }
+                )
 
-        return {
-            "status":     status,
-            "detections": detections,
-            "image":      self._encode_image(annotated),
-            "model":      "best.pt",
+        defect_count = sum(1 for item in detections if item["label"] != "Good")
+        good_count = sum(1 for item in detections if item["label"] == "Good")
+        total = len(detections)
+        status = "DEFECT" if defect_count > 0 else "GOOD"
+        encoded_image = encode_image_to_base64(annotated)
+
+        summary = {
+            "total": total,
+            "good_count": good_count,
+            "defect_count": defect_count,
+            "has_defects": defect_count > 0,
         }
 
-    # ── Helpers ───────────────────────────────────────────────────────────────
+        return {
+            "status": status,
+            "model": MODEL_NAME,
+            "detections": detections,
+            "summary": summary,
+            "total": total,
+            "good_count": good_count,
+            "defect_count": defect_count,
+            "annotated_image_base64": encoded_image,
+            "image": encoded_image,
+        }
+
     @staticmethod
-    def _draw_box(img, x1, y1, x2, y2, label, conf, color):
+    def _draw_box(
+        img: np.ndarray,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        label: str,
+        confidence: float,
+        color: tuple[int, int, int],
+    ) -> None:
         cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
 
-        text  = f"{label} {conf:.2f}"
-        font  = cv2.FONT_HERSHEY_SIMPLEX
+        text = f"{label} {confidence:.2f}"
+        font = cv2.FONT_HERSHEY_SIMPLEX
         scale = 0.55
-        (tw, th), baseline = cv2.getTextSize(text, font, scale, 1)
+        (text_width, text_height), baseline = cv2.getTextSize(text, font, scale, 1)
 
-        pad = 4
+        padding = 4
         cv2.rectangle(
             img,
-            (x1, y1 - th - baseline - pad * 2),
-            (x1 + tw + pad * 2, y1),
-            color, -1,
+            (x1, y1 - text_height - baseline - padding * 2),
+            (x1 + text_width + padding * 2, y1),
+            color,
+            -1,
         )
         cv2.putText(
-            img, text,
-            (x1 + pad, y1 - baseline - pad),
-            font, scale, (255, 255, 255), 1, cv2.LINE_AA,
+            img,
+            text,
+            (x1 + padding, y1 - baseline - padding),
+            font,
+            scale,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
         )
-
-    @staticmethod
-    def _encode_image(img: np.ndarray) -> str:
-        import base64
-        _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 90])
-        return base64.b64encode(buf).decode("utf-8")

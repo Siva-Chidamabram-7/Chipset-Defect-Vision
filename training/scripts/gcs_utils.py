@@ -8,7 +8,7 @@ Provides transparent local ↔ GCS path support for:
   • training/train.py        (Step 2 / Step 4)
 
 Usage pattern:
-    from scripts.gcs_utils import is_gcs_path, download_gcs_dir, upload_gcs_dir
+    from training.scripts.gcs_utils import is_gcs_path, download_gcs_dir, upload_gcs_dir
 
 All functions are no-ops / pass-throughs when given local paths.
 Requires: google-cloud-storage  (pip install -r training/requirements-training.txt)

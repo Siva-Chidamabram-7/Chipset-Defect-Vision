@@ -4,7 +4,7 @@ sam_auto_annotate.py — Step 1 of the SAM → YOLO bootstrap pipeline
 ────────────────────────────────────────────────────────────────────
 Uses SAM (Segment Anything Model) to generate bounding-box annotations
 automatically from a class-labelled folder structure.  Labels are written
-in YOLO format, ready for training with !training/train.py.
+in YOLO format, ready for training with training/train.py.
 
 No manual annotation is required.
 
@@ -51,9 +51,9 @@ Requirements:
 
 Bootstrap pipeline:
     Step 1  python scripts/sam_auto_annotate.py       # SAM labels → data/
-    Step 2  python !training/train.py                 # YOLO → weights/best.pt
+    Step 2  python training/train.py                  # YOLO -> weights/best.pt
     Step 3  python scripts/auto_label_with_yolo.py    # replace labels
-    Step 4  python !training/train.py                 # retrain → improved model
+    Step 4  python training/train.py                  # retrain -> improved model
     Step 5  (repeat Steps 3–4 as desired)
 """
 
@@ -71,14 +71,14 @@ import cv2
 import numpy as np
 
 # ── Project root ──────────────────────────────────────────────────────────────
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 # Configured in main() via gcs_utils.setup_logging() so that log level can be
 # controlled from the CLI and output is captured by Vertex AI / Docker.
 log = logging.getLogger("sam_annotate")
 
-# ── Class map — must stay in sync with !training/data.yaml ───────────────────
+# Must stay in sync with training/data.yaml.
 CLASS_MAP: dict[str, int] = {
     "Missing_hole":    0,
     "Mouse_bite":      1,
@@ -86,6 +86,7 @@ CLASS_MAP: dict[str, int] = {
     "Short":           3,
     "Spur":            4,
     "Spurious_copper": 5,
+    "Good":            6,
 }
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
@@ -131,8 +132,8 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
-        "--device", default="cpu",
-        help="Device for SAM inference: 'cpu', 'cuda', 'cuda:0', 'mps'.",
+        "--device", default=None,
+        help="Compute device: 'cuda', 'cpu', 'mps'. Auto-detected if omitted (cuda preferred).",
     )
     p.add_argument(
         "--val-split", type=float, default=0.20,
@@ -164,9 +165,9 @@ def parse_args() -> argparse.Namespace:
     # which is the standard Vertex AI custom-training-job pattern.
     import os
     p.set_defaults(
-        input       = os.environ.get("SAM_INPUT_PATH",   "dataset"),
-        output      = os.environ.get("SAM_OUTPUT_PATH",  "data"),
-        sam_weights = os.environ.get("SAM_WEIGHTS_PATH", "weights/sam_vit_h.pth"),
+        input       = os.environ.get("SAM_INPUT_PATH",   str(PROJECT_ROOT / "raw_data")),
+        output      = os.environ.get("SAM_OUTPUT_PATH",  str(PROJECT_ROOT / "training" / "data")),
+        sam_weights = os.environ.get("SAM_WEIGHTS_PATH", str(PROJECT_ROOT / "weights" / "sam_vit_b.pth")),
     )
     return p.parse_args()
 
@@ -353,16 +354,25 @@ def main() -> None:
     args = parse_args()
 
     # ── Logging setup (Vertex AI + Docker compatible) ─────────────────────────
-    from scripts.gcs_utils import setup_logging, is_gcs_path, resolve_input_path, \
+    from training.scripts.gcs_utils import setup_logging, is_gcs_path, resolve_input_path, \
         resolve_input_file, upload_gcs_dir
     setup_logging(level=getattr(logging, args.log_level.upper(), logging.INFO))
 
     log.info("=" * 60)
     log.info("[SAM] Step 1 — SAM Auto-Annotation starting")
+    # Auto-detect device when not explicitly specified
+    device = args.device
+    if device is None:
+        try:
+            import torch
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        except ImportError:
+            device = "cpu"
+
     log.info("[SAM] Input path    : %s", args.input)
     log.info("[SAM] Output path   : %s", args.output)
     log.info("[SAM] SAM weights   : %s", args.sam_weights)
-    log.info("[SAM] Device        : %s", args.device)
+    log.info("[SAM] Device        : %s", device)
     log.info("[SAM] Val split     : %.0f%%", args.val_split * 100)
     log.info("[SAM] Seed          : %d", args.seed)
     log.info("=" * 60)
@@ -458,7 +468,7 @@ def main() -> None:
         log.info("[SAM] Loading SAM checkpoint: %s (type=%s)", sam_weights.name, model_type)
 
         sam = sam_model_registry[model_type](checkpoint=str(sam_weights))
-        sam.to(device=args.device)
+        sam.to(device=device)
         sam.eval()
 
         mask_generator = SamAutomaticMaskGenerator(
@@ -575,7 +585,7 @@ def main() -> None:
             log.info("[SAM] GCS upload complete.")
 
         log.info("[SAM] Next step:")
-        log.info("[SAM]   python !training/train.py --data !training/data.yaml")
+        log.info("[SAM]   python training/train.py --data training/data.yaml")
         log.info("─" * 60)
 
     finally:

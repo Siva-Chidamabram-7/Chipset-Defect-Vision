@@ -1,33 +1,6 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# Inference-only dependencies — Chipset Defect Vision
-#
-# torch + torchvision are NOT listed here.
-# They are installed from the official CPU-only wheel in the Dockerfile to
-# avoid pulling the 2 GB GPU bundle from PyPI.
-#
-# For local development:
-#   pip install torch torchvision \
-#       --index-url https://download.pytorch.org/whl/cpu
-#
-# For training / SAM / GCS dependencies, see:
-#   training/requirements-training.txt
-#   training/requirements-sam.txt
-# ─────────────────────────────────────────────────────────────────────────────
-
-# ── Web server ────────────────────────────────────────────────────────────────
 fastapi==0.111.0
 uvicorn[standard]==0.29.0
 python-multipart==0.0.9
-
-# ── ML inference ──────────────────────────────────────────────────────────────
 ultralytics==8.2.18
-
-# ── Computer Vision ───────────────────────────────────────────────────────────
-# opencv-python-headless replaces opencv-python in Docker (see Dockerfile).
-# Do NOT pin opencv here — the Dockerfile controls the cv2 variant swap.
 numpy==1.26.4
-Pillow==10.3.0
-
-# ── Utilities ─────────────────────────────────────────────────────────────────
 pydantic==2.7.1
-PyYAML==6.0.1
