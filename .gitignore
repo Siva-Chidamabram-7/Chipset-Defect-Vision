@@ -80,6 +80,8 @@ data/**/*.cache
 # ── Tooling binaries in project root ─────────────────────────────────────────
 # gh CLI binary (accidentally placed in repo root)
 /gh
+# uvicorn binary (accidentally placed in repo root)
+/uvicorn
 
 # ── OS artefacts ──────────────────────────────────────────────────────────────
 .DS_Store

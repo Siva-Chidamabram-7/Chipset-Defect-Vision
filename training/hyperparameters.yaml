@@ -1,0 +1,17 @@
+model: yolo-m
+imgsz: 640
+batch: 4
+epochs: 100
+
+lr0: 0.01
+lrf: 0.01
+
+hsv_h: 0.01
+hsv_s: 0.5
+hsv_v: 0.4
+
+degrees: 5
+scale: 0.1
+
+flipud: 0.0
+fliplr: 0.0

@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Chipset Defect Vision — PCB Solder Inspection</title>
-  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="/static/styles.css?v=3" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link
     href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
@@ -88,92 +88,7 @@
     <!-- Main -->
     <main class="main">
 
-      <!-- ── Input Card ── -->
-      <section class="card input-card" id="inputCard">
-        <div class="card-header">
-          <h2>PCB Image Input</h2>
-          <p>Upload a PCB image or capture live from camera</p>
-        </div>
-
-        <!-- Mode Toggle -->
-        <div class="mode-toggle">
-          <button class="mode-btn active" id="btnUploadMode" data-mode="upload">
-            <svg viewBox="0 0 20 20" fill="currentColor"><path d="M16.88 9.1A4 4 0 0 1 16 17H5a5 5 0 0 1-1-9.9V7a3 3 0 0 1 4.52-2.59A4.98 4.98 0 0 1 17 8c0 .38-.04.74-.12 1.1zM11 11h3l-4-4-4 4h3v3h2v-3z"/></svg>
-            Upload Image
-          </button>
-          <button class="mode-btn" id="btnCameraMode" data-mode="camera">
-            <svg viewBox="0 0 20 20" fill="currentColor"><path d="M4 5a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-1.586l-1.707-1.707A1 1 0 0 0 12 3H8a1 1 0 0 0-.707.293L5.586 5H4zm8 9a3 3 0 1 1 0-6 3 3 0 0 1 0 6z"/></svg>
-            Live Camera
-          </button>
-        </div>
-
-        <!-- Upload Panel -->
-        <div class="panel upload-panel" id="uploadPanel">
-          <div class="drop-zone" id="dropZone">
-            <div class="drop-icon">
-              <svg viewBox="0 0 48 48" fill="none"><path d="M24 8V32M16 16l8-8 8 8" stroke="url(#ug)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M8 36h32" stroke="url(#ug)" stroke-width="2.5" stroke-linecap="round"/><defs><linearGradient id="ug" x1="0" y1="0" x2="48" y2="48" gradientUnits="userSpaceOnUse"><stop stop-color="#a78bfa"/><stop offset="1" stop-color="#38bdf8"/></linearGradient></defs></svg>
-            </div>
-            <p class="drop-text">Drag & drop PCB image here</p>
-            <p class="drop-sub">or click to browse files</p>
-            <p class="drop-hint">Supports JPG, PNG, WebP</p>
-            <input type="file" id="fileInput" accept="image/*" class="file-input" />
-          </div>
-        </div>
-
-        <!-- Camera Panel -->
-        <div class="panel camera-panel hidden" id="cameraPanel">
-          <div class="camera-viewport" id="cameraViewport">
-            <video id="cameraFeed" autoplay playsinline muted></video>
-            <div class="camera-overlay">
-              <div class="scan-line"></div>
-              <div class="corner tl"></div>
-              <div class="corner tr"></div>
-              <div class="corner bl"></div>
-              <div class="corner br"></div>
-            </div>
-            <div class="camera-placeholder" id="cameraPlaceholder">
-              <svg viewBox="0 0 64 64" fill="none"><circle cx="32" cy="32" r="14" stroke="#a78bfa" stroke-width="1.5"/><path d="M10 20 L10 14 L16 14M48 14 L54 14 L54 20M54 44 L54 50 L48 50M16 50 L10 50 L10 44" stroke="#38bdf8" stroke-width="1.5" stroke-linecap="round"/></svg>
-              <p>Camera not started</p>
-            </div>
-          </div>
-          <div class="camera-controls">
-            <button class="btn btn-secondary" id="btnStartCamera">
-              <svg viewBox="0 0 20 20" fill="currentColor"><path d="M4 5a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-1.586l-1.707-1.707A1 1 0 0 0 12 3H8a1 1 0 0 0-.707.293L5.586 5H4zm8 9a3 3 0 1 1 0-6 3 3 0 0 1 0 6z"/></svg>
-              Start Camera
-            </button>
-            <button class="btn btn-accent hidden" id="btnCapture">
-              <svg viewBox="0 0 20 20" fill="currentColor"><circle cx="10" cy="10" r="3"/><path d="M10 1a9 9 0 1 0 0 18A9 9 0 0 0 10 1zm0 16a7 7 0 1 1 0-14 7 7 0 0 1 0 14z"/></svg>
-              Capture Frame
-            </button>
-            <button class="btn btn-danger hidden" id="btnStopCamera">
-              <svg viewBox="0 0 20 20" fill="currentColor"><rect x="5" y="5" width="10" height="10" rx="1"/></svg>
-              Stop
-            </button>
-          </div>
-          <canvas id="captureCanvas" class="hidden"></canvas>
-        </div>
-      </section>
-
-      <!-- ── Preview Card ── -->
-      <section class="card preview-card hidden" id="previewCard">
-        <div class="card-header">
-          <h2>Image Preview</h2>
-          <button class="btn-ghost" id="btnClearPreview">
-            <svg viewBox="0 0 20 20" fill="currentColor"><path d="M4.293 4.293a1 1 0 0 1 1.414 0L10 8.586l4.293-4.293a1 1 0 1 1 1.414 1.414L11.414 10l4.293 4.293a1 1 0 0 1-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 0 1-1.414-1.414L8.586 10 4.293 5.707a1 1 0 0 1 0-1.414z"/></svg>
-            Clear
-          </button>
-        </div>
-        <div class="preview-wrap">
-          <img id="previewImg" src="" alt="PCB preview" />
-          <div class="preview-badge" id="previewBadge">Ready to scan</div>
-        </div>
-        <button class="btn btn-primary btn-scan" id="btnScan">
-          <svg viewBox="0 0 20 20" fill="currentColor"><path d="M9 9a2 2 0 1 1 4 0 2 2 0 0 1-4 0z"/><path fill-rule="evenodd" d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16zm1-13a4 4 0 0 0-3.446 6.032l-2.261 2.26a1 1 0 1 0 1.414 1.415l2.261-2.261A4 4 0 1 0 11 5z" clip-rule="evenodd"/></svg>
-          Scan Image
-        </button>
-      </section>
-
-      <!-- ── Processing Overlay ── -->
+      <!-- processing-overlay kept for JS refs; hidden via CSS -->
       <div class="processing-overlay hidden" id="processingOverlay">
         <div class="processing-card">
           <div class="processing-rings">
@@ -196,61 +111,163 @@
         </div>
       </div>
 
-      <!-- ── Results Card ── -->
-      <section class="card results-card hidden" id="resultsCard">
-        <div class="card-header">
-          <h2>Inspection Results</h2>
-          <button class="btn-ghost" id="btnNewScan">
-            <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M4 2a1 1 0 0 1 1 1v2.101a7.002 7.002 0 0 1 11.601 2.566 1 1 0 1 1-1.885.666A5.002 5.002 0 0 0 5.999 7H9a1 1 0 0 1 0 2H4a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1zm.008 9.057a1 1 0 0 1 1.276.61A5.002 5.002 0 0 0 14.001 13H11a1 1 0 1 1 0-2h5a1 1 0 0 1 1 1v5a1 1 0 1 1-2 0v-2.101a7.002 7.002 0 0 1-11.601-2.566 1 1 0 0 1 .61-1.276z" clip-rule="evenodd"/></svg>
-            New Scan
-          </button>
-        </div>
+      <!-- ── Horizontal Split Layout ── -->
+      <div class="main-container">
 
-        <!-- Stats Row -->
-        <div class="stats-row">
-          <div class="stat-card stat-total">
-            <div class="stat-icon">⬡</div>
-            <div class="stat-value" id="statTotal">0</div>
-            <div class="stat-label">Total Detections</div>
-          </div>
-          <div class="stat-card stat-good">
-            <div class="stat-icon">✓</div>
-            <div class="stat-value" id="statGood">0</div>
-            <div class="stat-label">Good Solder</div>
-          </div>
-          <div class="stat-card stat-defect">
-            <div class="stat-icon">⚠</div>
-            <div class="stat-value" id="statDefect">0</div>
-            <div class="stat-label">Defects Found</div>
-          </div>
-          <div class="stat-card stat-quality">
-            <div class="stat-icon">◈</div>
-            <div class="stat-value" id="statQuality">—</div>
-            <div class="stat-label">Board Quality</div>
-          </div>
-        </div>
+        <!-- ════ Left Panel (25%) ════ -->
+        <aside class="left-panel">
 
-        <!-- Annotated Image -->
-        <div class="results-image-wrap">
-          <img id="resultImg" src="" alt="Annotated result" />
-          <div class="results-legend">
-            <span class="legend-item legend-good">
-              <span class="legend-dot"></span>Good
-            </span>
-            <span class="legend-item legend-defect">
-              <span class="legend-dot"></span>Defect
-            </span>
-          </div>
-        </div>
+          <!-- Input Card -->
+          <section class="card input-card" id="inputCard">
+            <div class="card-header">
+              <h2>PCB Image Input</h2>
+              <p>Upload or capture a PCB image</p>
+            </div>
 
-        <!-- Detection List -->
-        <div class="detections-section">
-          <h3 class="detections-title">Detection Details</h3>
-          <div class="detections-list" id="detectionsList">
-            <p class="no-detections">No detections found.</p>
-          </div>
+            <!-- Mode Toggle -->
+            <div class="mode-toggle">
+              <button class="mode-btn active" id="btnUploadMode" data-mode="upload">
+                <svg viewBox="0 0 20 20" fill="currentColor"><path d="M16.88 9.1A4 4 0 0 1 16 17H5a5 5 0 0 1-1-9.9V7a3 3 0 0 1 4.52-2.59A4.98 4.98 0 0 1 17 8c0 .38-.04.74-.12 1.1zM11 11h3l-4-4-4 4h3v3h2v-3z"/></svg>
+                Upload
+              </button>
+              <button class="mode-btn" id="btnCameraMode" data-mode="camera">
+                <svg viewBox="0 0 20 20" fill="currentColor"><path d="M4 5a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-1.586l-1.707-1.707A1 1 0 0 0 12 3H8a1 1 0 0 0-.707.293L5.586 5H4zm8 9a3 3 0 1 1 0-6 3 3 0 0 1 0 6z"/></svg>
+                Camera
+              </button>
+            </div>
+
+            <!-- Upload Panel -->
+            <div class="panel upload-panel" id="uploadPanel">
+              <div class="drop-zone" id="dropZone">
+                <div class="drop-icon">
+                  <svg viewBox="0 0 48 48" fill="none"><path d="M24 8V32M16 16l8-8 8 8" stroke="url(#ug)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M8 36h32" stroke="url(#ug)" stroke-width="2.5" stroke-linecap="round"/><defs><linearGradient id="ug" x1="0" y1="0" x2="48" y2="48" gradientUnits="userSpaceOnUse"><stop stop-color="#a78bfa"/><stop offset="1" stop-color="#38bdf8"/></linearGradient></defs></svg>
+                </div>
+                <p class="drop-text">Drop image here</p>
+                <p class="drop-sub">or click to browse</p>
+                <p class="drop-hint">JPG · PNG · WebP</p>
+                <input type="file" id="fileInput" accept="image/*" class="file-input" />
+              </div>
+            </div>
+
+            <!-- Camera Panel -->
+            <div class="panel camera-panel hidden" id="cameraPanel">
+              <div class="camera-viewport" id="cameraViewport">
+                <video id="cameraFeed" autoplay playsinline muted></video>
+                <div class="camera-overlay">
+                  <div class="scan-line"></div>
+                  <div class="corner tl"></div>
+                  <div class="corner tr"></div>
+                  <div class="corner bl"></div>
+                  <div class="corner br"></div>
+                </div>
+                <div class="camera-placeholder" id="cameraPlaceholder">
+                  <svg viewBox="0 0 64 64" fill="none"><circle cx="32" cy="32" r="14" stroke="#a78bfa" stroke-width="1.5"/><path d="M10 20 L10 14 L16 14M48 14 L54 14 L54 20M54 44 L54 50 L48 50M16 50 L10 50 L10 44" stroke="#38bdf8" stroke-width="1.5" stroke-linecap="round"/></svg>
+                  <p>Camera not started</p>
+                </div>
+              </div>
+              <div class="camera-controls">
+                <button class="btn btn-secondary" id="btnStartCamera">
+                  <svg viewBox="0 0 20 20" fill="currentColor"><path d="M4 5a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-1.586l-1.707-1.707A1 1 0 0 0 12 3H8a1 1 0 0 0-.707.293L5.586 5H4zm8 9a3 3 0 1 1 0-6 3 3 0 0 1 0 6z"/></svg>
+                  Start
+                </button>
+                <button class="btn btn-accent hidden" id="btnCapture">
+                  <svg viewBox="0 0 20 20" fill="currentColor"><circle cx="10" cy="10" r="3"/><path d="M10 1a9 9 0 1 0 0 18A9 9 0 0 0 10 1zm0 16a7 7 0 1 1 0-14 7 7 0 0 1 0 14z"/></svg>
+                  Capture
+                </button>
+                <button class="btn btn-danger hidden" id="btnStopCamera">
+                  <svg viewBox="0 0 20 20" fill="currentColor"><rect x="5" y="5" width="10" height="10" rx="1"/></svg>
+                  Stop
+                </button>
+              </div>
+              <canvas id="captureCanvas" class="hidden"></canvas>
+            </div>
+          </section>
+
+          <!-- Preview Card (visible before scan, hidden after scan) -->
+          <section class="card preview-card hidden" id="previewCard">
+            <div class="card-header">
+              <h2>Preview</h2>
+              <button class="btn-ghost" id="btnClearPreview">
+                <svg viewBox="0 0 20 20" fill="currentColor"><path d="M4.293 4.293a1 1 0 0 1 1.414 0L10 8.586l4.293-4.293a1 1 0 1 1 1.414 1.414L11.414 10l4.293 4.293a1 1 0 0 1-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 0 1-1.414-1.414L8.586 10 4.293 5.707a1 1 0 0 1 0-1.414z"/></svg>
+                Clear
+              </button>
+            </div>
+            <div class="preview-wrap">
+              <img id="previewImg" src="" alt="PCB preview" />
+              <div class="preview-badge" id="previewBadge">Ready to scan</div>
+            </div>
+            <button class="btn btn-primary btn-scan" id="btnScan">
+              <svg viewBox="0 0 20 20" fill="currentColor"><path d="M9 9a2 2 0 1 1 4 0 2 2 0 0 1-4 0z"/><path fill-rule="evenodd" d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16zm1-13a4 4 0 0 0-3.446 6.032l-2.261 2.26a1 1 0 1 0 1.414 1.415l2.261-2.261A4 4 0 1 0 11 5z" clip-rule="evenodd"/></svg>
+              Scan Image
+            </button>
+          </section>
+
+        </aside>
+
+        <!-- ════ Right Panel (75%) ════ -->
+        <div class="right-panel">
+
+          <!-- Results Card (visible after scan) -->
+          <section class="card results-card hidden" id="resultsCard">
+            <div class="card-header">
+              <h2>Inspection Results</h2>
+              <button class="btn-ghost" id="btnNewScan">
+                <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M4 2a1 1 0 0 1 1 1v2.101a7.002 7.002 0 0 1 11.601 2.566 1 1 0 1 1-1.885.666A5.002 5.002 0 0 0 5.999 7H9a1 1 0 0 1 0 2H4a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1zm.008 9.057a1 1 0 0 1 1.276.61A5.002 5.002 0 0 0 14.001 13H11a1 1 0 1 1 0-2h5a1 1 0 0 1 1 1v5a1 1 0 1 1-2 0v-2.101a7.002 7.002 0 0 1-11.601-2.566 1 1 0 0 1 .61-1.276z" clip-rule="evenodd"/></svg>
+                New Scan
+              </button>
+            </div>
+
+            <!-- Stats Row -->
+            <div class="stats-row">
+              <div class="stat-card stat-total">
+                <div class="stat-icon">⬡</div>
+                <div class="stat-value" id="statTotal">0</div>
+                <div class="stat-label">Total Detections</div>
+              </div>
+              <div class="stat-card stat-good hidden">
+                <div class="stat-icon">✓</div>
+                <div class="stat-value" id="statGood">0</div>
+                <div class="stat-label">Good Solder</div>
+              </div>
+              <div class="stat-card stat-defect">
+                <div class="stat-icon">⚠</div>
+                <div class="stat-value" id="statDefect">0</div>
+                <div class="stat-label">Defects Found</div>
+              </div>
+              <div class="stat-card stat-quality">
+                <div class="stat-icon">◈</div>
+                <div class="stat-value" id="statQuality">—</div>
+                <div class="stat-label">Board Quality</div>
+              </div>
+            </div>
+
+            <!-- Annotated Image (large, centered) -->
+            <div class="results-image-wrap">
+              <img id="resultImg" src="" alt="Annotated result" />
+              <div class="results-legend">
+                <span class="legend-item legend-good">
+                  <span class="legend-dot"></span>Good
+                </span>
+                <span class="legend-item legend-defect">
+                  <span class="legend-dot"></span>Defect
+                </span>
+              </div>
+            </div>
+
+            <!-- Detection List -->
+            <div class="detections-section">
+              <h3 class="detections-title">Detection Details</h3>
+              <div class="detections-list" id="detectionsList">
+                <p class="no-detections">No detections found.</p>
+              </div>
+            </div>
+          </section>
+
         </div>
-      </section>
+        <!-- /right-panel -->
+
+      </div>
+      <!-- /main-container -->
 
     </main>
 
@@ -266,6 +283,6 @@
   <!-- Toast -->
   <div class="toast-container" id="toastContainer"></div>
 
-  <script src="/static/script.js"></script>
+  <script src="/static/script.js?v=3"></script>
 </body>
 </html>

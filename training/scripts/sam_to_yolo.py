@@ -40,7 +40,7 @@ import cv2
 import numpy as np
 
 # ── Project root ──────────────────────────────────────────────────────────────
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # ── Class map ─────────────────────────────────────────────────────────────────
 CLASS_MAP: dict[str, int] = {
@@ -410,7 +410,7 @@ def main() -> None:
         sys.exit(1)
 
     print("\n[sam_to_yolo] Next step:")
-    print("  python !training/train.py --data !training/data.yaml --epochs 50")
+    print("  python training/train.py --data training/data.yaml --epochs 50")
 
 
 if __name__ == "__main__":

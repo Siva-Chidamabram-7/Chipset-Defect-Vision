@@ -160,15 +160,11 @@ def parse_args() -> argparse.Namespace:
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Logging verbosity (passed to Python logging module).",
     )
-    # ── Environment-variable defaults (set by Vertex AI or CI) ────────────────
-    # The script reads these so it can be driven entirely by env vars,
-    # which is the standard Vertex AI custom-training-job pattern.
-    import os
-    p.set_defaults(
-        input       = os.environ.get("SAM_INPUT_PATH",   str(PROJECT_ROOT / "raw_data")),
-        output      = os.environ.get("SAM_OUTPUT_PATH",  str(PROJECT_ROOT / "training" / "data")),
-        sam_weights = os.environ.get("SAM_WEIGHTS_PATH", str(PROJECT_ROOT / "weights" / "sam_vit_b.pth")),
-    )
+    # NOTE: defaults are resolved in main() using the three-level priority chain:
+    #   CLI arg  →  environment variable  →  hardcoded default
+    # Do NOT call p.set_defaults() here: it would overwrite a missing env-var
+    # with the hardcoded default at parse time, making it impossible for main()
+    # to distinguish "user passed CLI flag" from "env var was set".
     return p.parse_args()
 
 
@@ -351,7 +347,23 @@ def write_labels(
 # ═════════════════════════════════════════════════════════════════════════════
 
 def main() -> None:
+    import os
     args = parse_args()
+
+    # ── Three-level path resolution: CLI  →  env var  →  hardcoded default ───
+    # CLI arg takes precedence; env var is only a fallback (Vertex AI pattern);
+    # hardcoded default is used when neither is supplied.
+    def _resolve_path(cli_val: str | None, env_key: str, hardcoded: Path) -> str:
+        if cli_val is not None:                  # user passed an explicit CLI arg
+            return cli_val
+        env_val = os.environ.get(env_key, "").strip()
+        if env_val:                              # env var is set and non-empty
+            return env_val
+        return str(hardcoded)                    # fall back to hardcoded default
+
+    args.input       = _resolve_path(args.input,       "SAM_INPUT_PATH",   PROJECT_ROOT / "raw_data")
+    args.output      = _resolve_path(args.output,      "SAM_OUTPUT_PATH",  PROJECT_ROOT / "training" / "data")
+    args.sam_weights = _resolve_path(args.sam_weights, "SAM_WEIGHTS_PATH", PROJECT_ROOT / "weights" / "sam_vit_b.pth")
 
     # ── Logging setup (Vertex AI + Docker compatible) ─────────────────────────
     from training.scripts.gcs_utils import setup_logging, is_gcs_path, resolve_input_path, \
@@ -389,6 +401,16 @@ def main() -> None:
         input_dir = resolve_input_path(args.input, tmp, "input")
         if not input_dir.is_absolute():
             input_dir = PROJECT_ROOT / input_dir
+
+        # ── Debug: confirm the resolved path and contents ─────────────────────
+        log.info("[SAM] Resolved input_dir : %s", input_dir)
+        log.info("[SAM] input_dir exists   : %s", input_dir.exists())
+        if input_dir.exists():
+            all_imgs = [
+                f for d in input_dir.iterdir() if d.is_dir()
+                for f in d.iterdir() if f.suffix.lower() in IMAGE_EXTS
+            ]
+            log.info("[SAM] Total images found : %d", len(all_imgs))
 
         # -- SAM weights: download from GCS if needed -------------------------
         sam_weights = resolve_input_file(args.sam_weights, tmp, Path(args.sam_weights).name)

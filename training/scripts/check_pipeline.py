@@ -22,8 +22,8 @@ Additional cross-checks:
     • Images with empty label files (background-only warning)
 
 Usage (from project root):
-    python scripts/check_pipeline.py
-    python scripts/check_pipeline.py --verbose
+    python training/scripts/check_pipeline.py
+    python training/scripts/check_pipeline.py --verbose
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ import sys
 from pathlib import Path
 
 # ── Project root ──────────────────────────────────────────────────────────────
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 IMAGE_EXTS  = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 SAM_WEIGHTS = ["sam_vit_b.pth", "sam_vit_l.pth", "sam_vit_h.pth"]
@@ -357,7 +357,7 @@ class PipelineChecker:
             self.ok(f"best.pt  ({size_mb} MB)  — fine-tuned model ready for inference.")
         else:
             self.warn(
-                "weights/best.pt not found — inference will use base yolov8n.pt.",
+                "weights/best.pt not found — inference cannot start until best.pt is available.",
             )
             self.results.append(f"{INFO}To train: python training/train.py")
 

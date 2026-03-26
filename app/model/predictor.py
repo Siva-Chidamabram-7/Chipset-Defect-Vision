@@ -5,6 +5,7 @@ from typing import Any
 
 import cv2
 import numpy as np
+import yaml
 
 from app.config import CONFIDENCE_THRESHOLD, MODEL_NAME, MODEL_PATH
 from app.utils.image_utils import encode_image_to_base64
@@ -16,25 +17,31 @@ try:
 except ImportError:
     YOLO_AVAILABLE = False
 
+_DATA_YAML = Path(__file__).resolve().parents[2] / "training" / "data.yaml"
 
-CLASS_NAMES = {
-    0: "Missing_hole",
-    1: "Mouse_bite",
-    2: "Open_circuit",
-    3: "Short",
-    4: "Spur",
-    5: "Spurious_copper",
-    6: "Good",
-}
+_CLASS_COLORS = [
+    (68, 68, 239),    # missing_hole  — blue/purple
+    (8, 179, 234),    # mouse_bite    — cyan
+    (246, 130, 59),   # open_circuit  — orange
+    (247, 85, 168),   # short         — pink
+    (22, 115, 249),   # spur          — blue
+    (166, 184, 20),   # spurious_copper — yellow-green
+]
 
-COLORS = {
-    "Missing_hole": (68, 68, 239),
-    "Mouse_bite": (8, 179, 234),
-    "Open_circuit": (246, 130, 59),
-    "Short": (247, 85, 168),
-    "Spur": (22, 115, 249),
-    "Spurious_copper": (166, 184, 20),
-    "Good": (50, 205, 50),
+
+def _load_class_names() -> list[str]:
+    with open(_DATA_YAML) as f:
+        data = yaml.safe_load(f)
+    names = data.get("names", [])
+    if isinstance(names, dict):
+        return [names[i] for i in sorted(names)]
+    return list(names)
+
+
+CLASS_NAMES: list[str] = _load_class_names()
+COLORS: dict[str, tuple[int, int, int]] = {
+    name: _CLASS_COLORS[i % len(_CLASS_COLORS)]
+    for i, name in enumerate(CLASS_NAMES)
 }
 
 
@@ -86,7 +93,7 @@ class SolderDefectPredictor:
                 x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
                 confidence = round(float(box.conf[0]), 4)
                 class_id = int(box.cls[0])
-                label = CLASS_NAMES.get(class_id, "unknown")
+                label = CLASS_NAMES[class_id] if class_id < len(CLASS_NAMES) else "unknown"
                 color = COLORS.get(label, (120, 120, 120))
 
                 self._draw_box(annotated, x1, y1, x2, y2, label, confidence, color)
@@ -99,15 +106,12 @@ class SolderDefectPredictor:
                     }
                 )
 
-        defect_count = sum(1 for item in detections if item["label"] != "Good")
-        good_count = sum(1 for item in detections if item["label"] == "Good")
-        total = len(detections)
+        defect_count = len(detections)
         status = "DEFECT" if defect_count > 0 else "GOOD"
         encoded_image = encode_image_to_base64(annotated)
 
         summary = {
-            "total": total,
-            "good_count": good_count,
+            "total": defect_count,
             "defect_count": defect_count,
             "has_defects": defect_count > 0,
         }
@@ -117,9 +121,6 @@ class SolderDefectPredictor:
             "model": MODEL_NAME,
             "detections": detections,
             "summary": summary,
-            "total": total,
-            "good_count": good_count,
-            "defect_count": defect_count,
             "annotated_image_base64": encoded_image,
             "image": encoded_image,
         }

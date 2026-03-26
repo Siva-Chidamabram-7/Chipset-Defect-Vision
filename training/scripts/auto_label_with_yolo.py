@@ -8,9 +8,9 @@ labels typically yields a significantly better model.
 
 Bootstrap loop (zero manual annotation required):
     Step 1  python scripts/sam_auto_annotate.py       # SAM labels → data/
-    Step 2  python !training/train.py                 # train YOLO on SAM labels
+    Step 2  python training/train.py                  # train YOLO on SAM labels
     Step 3  python scripts/auto_label_with_yolo.py    # replace labels with YOLO
-    Step 4  python !training/train.py                 # retrain on improved labels
+    Step 4  python training/train.py                  # retrain on improved labels
     Step 5  (repeat Steps 3–4 as many times as desired)
 
 How it works:
@@ -39,7 +39,7 @@ Usage (from project root):
 
 Requirements:
     pip install -r requirements-training.txt    (ultralytics + GCS support)
-    weights/best.pt must exist                  (run !training/train.py first)
+    weights/best.pt must exist                  (run training/train.py first)
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ import tempfile
 from pathlib import Path
 
 # ── Project root ──────────────────────────────────────────────────────────────
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 log = logging.getLogger("yolo_label")
@@ -164,7 +164,7 @@ def main() -> None:
     args = parse_args()
 
     # ── Logging setup (Vertex AI + Docker compatible) ─────────────────────────
-    from scripts.gcs_utils import setup_logging, is_gcs_path, resolve_input_path, \
+    from training.scripts.gcs_utils import setup_logging, is_gcs_path, resolve_input_path, \
         resolve_input_file, upload_gcs_dir, download_gcs_dir
     setup_logging(level=getattr(logging, args.log_level.upper(), logging.INFO))
 
@@ -202,7 +202,7 @@ def main() -> None:
         if not weights_path.exists():
             log.error(
                 "[YOLO-Label] Weights not found: %s\n"
-                "             Run !training/train.py first to produce weights/best.pt.",
+                "             Run training/train.py first to produce weights/best.pt.",
                 weights_path,
             )
             sys.exit(1)
@@ -324,7 +324,7 @@ def main() -> None:
             log.info("[YOLO-Label] GCS upload complete.")
 
         log.info("[YOLO-Label] Next step:")
-        log.info("[YOLO-Label]   python !training/train.py --data !training/data.yaml")
+        log.info("[YOLO-Label]   python training/train.py --data training/data.yaml")
         log.info("─" * 60)
 
     finally:

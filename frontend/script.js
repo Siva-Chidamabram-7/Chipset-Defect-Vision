@@ -10,6 +10,13 @@
 const API_BASE = '';          // same origin; change to http://localhost:8080 for dev
 const HEALTH_INTERVAL = 30_000;   // ms between health-checks
 
+// ── Label display mapping ───────────────────────────────────────────────────
+// Maps raw model class names to user-facing display names.
+// Does NOT affect API calls, model weights, or training data.
+const labelMap = {
+  Solder_defect: 'Solder Defect',
+};
+
 // ── DOM Refs ───────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
 
@@ -98,7 +105,7 @@ async function checkHealth() {
     const data = await res.json();
     if (data.status === 'ok') {
       setStatus('online', 'System Online');
-      if (data.model_loaded) footerModel.textContent = `Model: ${data.version}`;
+      if (data.model_loaded) footerModel.textContent = `API ${data.version} | Model: ${data.model}`;
     } else {
       setStatus('offline', 'Degraded');
     }
@@ -320,7 +327,13 @@ function showProcessing(show) {
 
 // ══════════════════════════════════════════════════════════════ RESULTS ══════
 function displayResults(data) {
-  const { detections = [], total = 0, defect_count = 0, good_count = 0, image, model } = data;
+  const detections = data.detections ?? [];
+  const summary = data.summary ?? {};
+  const total = summary.total ?? data.total ?? detections.length;
+  const defect_count = summary.defect_count ?? data.defect_count ?? 0;
+  const good_count = summary.good_count ?? data.good_count ?? 0;
+  const image = data.annotated_image_base64 ?? data.image;
+  const model = data.model;
 
   // Stats
   statTotal.textContent  = total;
@@ -344,11 +357,13 @@ function displayResults(data) {
   } else {
     detections.forEach((det, i) => {
       const item = document.createElement('div');
-      item.className = `detection-item ${det.label}`;
+      const cssClass = det.label === 'Good' ? 'good' : 'defect'; // red for all non-Good labels
+      const displayLabel = labelMap[det.label] || det.label;      // apply display mapping
+      item.className = `detection-item ${cssClass}`;
       const [x1,y1,x2,y2] = det.bbox;
       item.innerHTML = `
         <span class="di-num">#${String(i+1).padStart(2,'0')}</span>
-        <span class="di-badge ${det.label}">${det.label.toUpperCase()}</span>
+        <span class="di-badge ${cssClass}">${displayLabel.toUpperCase()}</span>
         <span class="di-conf">${(det.confidence * 100).toFixed(1)}%</span>
         <span class="di-bbox">[${x1},${y1} → ${x2},${y2}]</span>
       `;
@@ -360,6 +375,7 @@ function displayResults(data) {
   previewBadge.textContent = 'Scanned';
   previewBadge.style.color = 'var(--green)';
 
+  // Show result in right panel — preview stays visible in left panel
   resultsCard.classList.remove('hidden');
   resultsCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
