@@ -1,0 +1,5 @@
+timestamp=2026-03-27T16:07:19+00:00
+model=best.pt
+inference_ms=845.85
+status=GOOD
+defect_count=0

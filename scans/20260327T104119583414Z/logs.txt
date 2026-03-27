@@ -1,0 +1,6 @@
+timestamp=2026-03-27T10:41:19+00:00
+model=best.pt
+inference_ms=137.66
+status=DEFECT
+defect_count=1
+detection[1] class=short confidence=0.3570 bbox=[1279, 542, 1689, 895]

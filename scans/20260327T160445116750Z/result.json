@@ -1,0 +1,62 @@
+{
+  "status": "DEFECT",
+  "model": "best.pt",
+  "detections": [
+    {
+      "class": "missing_hole",
+      "label": "missing_hole",
+      "confidence": 0.8343,
+      "bbox": [
+        411,
+        169,
+        436,
+        210
+      ]
+    },
+    {
+      "class": "missing_hole",
+      "label": "missing_hole",
+      "confidence": 0.8244,
+      "bbox": [
+        394,
+        177,
+        414,
+        211
+      ]
+    },
+    {
+      "class": "missing_hole",
+      "label": "missing_hole",
+      "confidence": 0.8032,
+      "bbox": [
+        452,
+        163,
+        476,
+        201
+      ]
+    },
+    {
+      "class": "missing_hole",
+      "label": "missing_hole",
+      "confidence": 0.722,
+      "bbox": [
+        359,
+        258,
+        378,
+        288
+      ]
+    }
+  ],
+  "summary": {
+    "total": 4,
+    "good_count": 0,
+    "defect_count": 4,
+    "has_defects": true
+  },
+  "total": 4,
+  "good_count": 0,
+  "defect_count": 4,
+  "timings": {
+    "inference_ms": 1926.93
+  }
+}

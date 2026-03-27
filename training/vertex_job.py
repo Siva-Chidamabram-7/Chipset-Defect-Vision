@@ -1,3 +1,34 @@
+"""
+training/vertex_job.py — Submit a custom YOLO training job to Google Vertex AI.
+
+This script is the operator-facing tool for launching cloud training.  It:
+  1. Reads configuration from CLI flags or environment variables.
+  2. Validates consistency (e.g. CPU device + accelerator_count must both be 0).
+  3. Calls google.cloud.aiplatform to create a CustomJob.
+  4. Optionally waits for completion (sync mode) or returns immediately (--async).
+
+The training logic itself lives inside a Docker image (--image-uri).  That
+image runs training/pipeline.py → training/train.py inside the Vertex container.
+
+Prerequisites:
+  pip install google-cloud-aiplatform  (or: pip install -r requirements-training.txt)
+  gcloud auth application-default login  (or set GOOGLE_APPLICATION_CREDENTIALS)
+
+Usage:
+  python training/vertex_job.py \\
+    --image-uri gcr.io/my-project/chipset-train:latest \\
+    --data gs://my-bucket/data/ \\
+    --output-model gs://my-bucket/models/
+
+GPU example:
+  python training/vertex_job.py \\
+    --image-uri ... --data ... --output-model ... \\
+    --device cuda \\
+    --machine-type n1-standard-8 \\
+    --accelerator-type NVIDIA_TESLA_T4 \\
+    --accelerator-count 1
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -5,16 +36,17 @@ import os
 import sys
 from pathlib import Path
 
+# ── sys.path fix — allow `from training.config import …` when run directly ───
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from training.config import (
-    VERTEX_DEFAULT_DATA_URI,
-    VERTEX_DEFAULT_OUTPUT_URI,
-    VERTEX_MACHINE_TYPE,
-    VERTEX_PROJECT_ID,
-    VERTEX_REGION,
+    VERTEX_DEFAULT_DATA_URI,    # gs:// dataset URI (env GCS_DATA_URI)
+    VERTEX_DEFAULT_OUTPUT_URI,  # gs:// output URI  (env GCS_MODEL_OUTPUT_URI)
+    VERTEX_MACHINE_TYPE,        # default n1-standard-8
+    VERTEX_PROJECT_ID,          # GCP project ID
+    VERTEX_REGION,              # GCP region
 )
 
 
@@ -106,7 +138,9 @@ def main() -> int:
             "Missing dataset URI. Provide --data or set GCS_DATA_URI."
         )
 
-    # Consistency guard: if a CPU device is requested, ensure no GPU is attached.
+    # ── Consistency guard ─────────────────────────────────────────────────────
+    # Vertex AI will reject a job spec that requests a CPU device but attaches
+    # a GPU accelerator — catch this early with a clear message.
     if args.device == "cpu" and args.accelerator_count > 0:
         raise SystemExit(
             "Conflicting options: --device cpu with --accelerator-count > 0.  "
@@ -114,6 +148,7 @@ def main() -> int:
             "or set --device cuda for a GPU job."
         )
 
+    # ── Import Vertex AI SDK ──────────────────────────────────────────────────
     try:
         from google.cloud import aiplatform
     except ImportError as exc:  # pragma: no cover
@@ -122,22 +157,31 @@ def main() -> int:
             "Install training/requirements-training.txt before using vertex_job.py."
         ) from exc
 
+    # ── Initialise SDK client ─────────────────────────────────────────────────
+    # staging_bucket is where Vertex stages job inputs/outputs before forwarding
+    # them to the container.  Can be left None if base_output_dir is set.
     aiplatform.init(
         project=args.project_id,
         location=args.region,
         staging_bucket=args.staging_bucket or None,
     )
 
-    # Hyperparameters are baked into the training image via hyperparameters.yaml.
-    # Only operational arguments are passed to train.py here.
+    # ── Container arguments ───────────────────────────────────────────────────
+    # Hyperparameters are baked into the Docker image via hyperparameters.yaml.
+    # Only the operational path arguments are forwarded to train.py here.
+    # Adding more train.py flags here does NOT require rebuilding the image.
     container_args = [
-        f"--data={args.data}",
-        f"--output-model={args.output_model}",
-        f"--device={args.device}",
+        f"--data={args.data}",              # GCS dataset URI → train.py --data
+        f"--output-model={args.output_model}",  # GCS output URI → train.py --output-model
+        f"--device={args.device}",          # "cpu" or "cuda" → train.py --device
     ]
 
     machine_spec = _build_machine_spec(args)
 
+    # ── Worker pool spec ──────────────────────────────────────────────────────
+    # replica_count=1 — single-worker job (no distributed training needed at this scale).
+    # env vars are injected alongside container_args so that pipeline.py / train.py
+    # can read them via os.getenv() in addition to CLI parsing.
     worker_pool_specs = [
         {
             "machine_spec": machine_spec,
@@ -146,21 +190,26 @@ def main() -> int:
                 "image_uri": args.image_uri,
                 "args": container_args,
                 "env": [
+                    # Standard Vertex AI Training env vars (AIP_*)
                     {"name": "AIP_TRAINING_DATA_URI", "value": args.data},
-                    {"name": "AIP_MODEL_DIR", "value": args.output_model},
-                    {"name": "GCS_DATA_URI", "value": args.data},
-                    {"name": "GCS_MODEL_OUTPUT_URI", "value": args.output_model},
+                    {"name": "AIP_MODEL_DIR",          "value": args.output_model},
+                    # Project-specific env vars read by pipeline.py / train.py
+                    {"name": "GCS_DATA_URI",           "value": args.data},
+                    {"name": "GCS_MODEL_OUTPUT_URI",   "value": args.output_model},
                 ],
             },
         }
     ]
 
+    # ── Create and submit the job ─────────────────────────────────────────────
     job = aiplatform.CustomJob(
         display_name=args.display_name,
         worker_pool_specs=worker_pool_specs,
+        # base_output_dir tells Vertex where to stage the container's output dir
         base_output_dir=args.output_model if args.output_model.startswith("gs://") else None,
     )
 
+    # sync=True blocks until job completion; --async returns immediately
     job.run(sync=not args.run_async, service_account=args.service_account or None)
 
     gpu_info = (

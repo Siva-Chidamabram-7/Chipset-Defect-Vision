@@ -1,0 +1,29 @@
+{
+  "status": "DEFECT",
+  "model": "best.pt",
+  "detections": [
+    {
+      "class": "solder_bridge",
+      "label": "solder_bridge",
+      "confidence": 0.5352,
+      "bbox": [
+        1985,
+        739,
+        2047,
+        870
+      ]
+    }
+  ],
+  "summary": {
+    "total": 1,
+    "good_count": 0,
+    "defect_count": 1,
+    "has_defects": true
+  },
+  "total": 1,
+  "good_count": 0,
+  "defect_count": 1,
+  "timings": {
+    "inference_ms": 124.3
+  }
+}

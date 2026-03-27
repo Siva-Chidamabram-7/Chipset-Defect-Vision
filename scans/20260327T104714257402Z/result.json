@@ -1,0 +1,1954 @@
+{
+  "status": "DEFECT",
+  "model": "best.pt",
+  "detections": [
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.8287,
+      "bbox": [
+        124,
+        39,
+        153,
+        60
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.5123,
+      "bbox": [
+        157,
+        96,
+        184,
+        123
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.4943,
+      "bbox": [
+        90,
+        23,
+        107,
+        39
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.472,
+      "bbox": [
+        77,
+        131,
+        97,
+        159
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.4632,
+      "bbox": [
+        159,
+        93,
+        183,
+        119
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.4608,
+      "bbox": [
+        56,
+        93,
+        87,
+        127
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.4606,
+      "bbox": [
+        81,
+        121,
+        109,
+        155
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.4596,
+      "bbox": [
+        0,
+        96,
+        48,
+        181
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.4547,
+      "bbox": [
+        102,
+        127,
+        114,
+        151
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.4372,
+      "bbox": [
+        43,
+        78,
+        67,
+        103
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.4272,
+      "bbox": [
+        125,
+        111,
+        145,
+        133
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.4235,
+      "bbox": [
+        151,
+        97,
+        169,
+        120
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.4186,
+      "bbox": [
+        0,
+        157,
+        47,
+        213
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.416,
+      "bbox": [
+        49,
+        77,
+        71,
+        101
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.4059,
+      "bbox": [
+        43,
+        89,
+        125,
+        191
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.3983,
+      "bbox": [
+        54,
+        77,
+        72,
+        97
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.3897,
+      "bbox": [
+        5,
+        162,
+        55,
+        213
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.389,
+      "bbox": [
+        77,
+        110,
+        125,
+        158
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.3884,
+      "bbox": [
+        41,
+        91,
+        98,
+        191
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.3717,
+      "bbox": [
+        112,
+        107,
+        136,
+        137
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.3668,
+      "bbox": [
+        53,
+        76,
+        79,
+        97
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.36,
+      "bbox": [
+        124,
+        98,
+        149,
+        130
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.3591,
+      "bbox": [
+        147,
+        101,
+        172,
+        132
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.3551,
+      "bbox": [
+        164,
+        92,
+        185,
+        116
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.3547,
+      "bbox": [
+        122,
+        114,
+        144,
+        137
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.3536,
+      "bbox": [
+        156,
+        115,
+        175,
+        143
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.3456,
+      "bbox": [
+        90,
+        119,
+        112,
+        155
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.3402,
+      "bbox": [
+        65,
+        100,
+        102,
+        133
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.3315,
+      "bbox": [
+        121,
+        102,
+        144,
+        132
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.3313,
+      "bbox": [
+        90,
+        23,
+        113,
+        40
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.3304,
+      "bbox": [
+        100,
+        128,
+        127,
+        158
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.3299,
+      "bbox": [
+        157,
+        0,
+        234,
+        74
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.3261,
+      "bbox": [
+        61,
+        105,
+        99,
+        136
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.3154,
+      "bbox": [
+        136,
+        74,
+        163,
+        108
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.3153,
+      "bbox": [
+        69,
+        120,
+        93,
+        137
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.3132,
+      "bbox": [
+        150,
+        134,
+        177,
+        167
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.3127,
+      "bbox": [
+        75,
+        194,
+        90,
+        214
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.3103,
+      "bbox": [
+        110,
+        136,
+        136,
+        162
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.3089,
+      "bbox": [
+        136,
+        104,
+        156,
+        126
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.3059,
+      "bbox": [
+        93,
+        118,
+        114,
+        150
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.3026,
+      "bbox": [
+        80,
+        59,
+        106,
+        80
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2978,
+      "bbox": [
+        63,
+        123,
+        77,
+        140
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2937,
+      "bbox": [
+        158,
+        67,
+        179,
+        97
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2926,
+      "bbox": [
+        130,
+        110,
+        145,
+        131
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2868,
+      "bbox": [
+        97,
+        129,
+        113,
+        152
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2834,
+      "bbox": [
+        94,
+        145,
+        121,
+        170
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2819,
+      "bbox": [
+        94,
+        24,
+        111,
+        39
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2808,
+      "bbox": [
+        109,
+        141,
+        135,
+        167
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2785,
+      "bbox": [
+        133,
+        61,
+        165,
+        93
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2731,
+      "bbox": [
+        50,
+        77,
+        65,
+        98
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2725,
+      "bbox": [
+        38,
+        61,
+        77,
+        92
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.272,
+      "bbox": [
+        127,
+        65,
+        163,
+        98
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2644,
+      "bbox": [
+        56,
+        72,
+        82,
+        94
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2625,
+      "bbox": [
+        41,
+        85,
+        55,
+        109
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2611,
+      "bbox": [
+        6,
+        44,
+        64,
+        101
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2592,
+      "bbox": [
+        81,
+        138,
+        107,
+        162
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.258,
+      "bbox": [
+        122,
+        105,
+        177,
+        171
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2531,
+      "bbox": [
+        72,
+        113,
+        104,
+        134
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.249,
+      "bbox": [
+        1,
+        90,
+        92,
+        192
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2483,
+      "bbox": [
+        91,
+        109,
+        115,
+        134
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2476,
+      "bbox": [
+        62,
+        117,
+        77,
+        140
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2464,
+      "bbox": [
+        131,
+        95,
+        155,
+        129
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2455,
+      "bbox": [
+        159,
+        79,
+        182,
+        111
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.245,
+      "bbox": [
+        150,
+        72,
+        176,
+        100
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2436,
+      "bbox": [
+        78,
+        127,
+        134,
+        191
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2415,
+      "bbox": [
+        156,
+        113,
+        185,
+        137
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2412,
+      "bbox": [
+        76,
+        122,
+        104,
+        157
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2405,
+      "bbox": [
+        12,
+        119,
+        41,
+        160
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2393,
+      "bbox": [
+        94,
+        139,
+        108,
+        157
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2374,
+      "bbox": [
+        60,
+        91,
+        90,
+        124
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2358,
+      "bbox": [
+        126,
+        40,
+        186,
+        115
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2336,
+      "bbox": [
+        102,
+        48,
+        127,
+        69
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2323,
+      "bbox": [
+        143,
+        88,
+        167,
+        121
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2304,
+      "bbox": [
+        143,
+        75,
+        162,
+        106
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2297,
+      "bbox": [
+        52,
+        97,
+        75,
+        128
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2292,
+      "bbox": [
+        61,
+        89,
+        101,
+        124
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.229,
+      "bbox": [
+        76,
+        66,
+        100,
+        87
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2285,
+      "bbox": [
+        120,
+        39,
+        144,
+        59
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2278,
+      "bbox": [
+        141,
+        68,
+        172,
+        100
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2275,
+      "bbox": [
+        86,
+        59,
+        113,
+        82
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2259,
+      "bbox": [
+        0,
+        23,
+        20,
+        54
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2246,
+      "bbox": [
+        64,
+        120,
+        93,
+        141
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2222,
+      "bbox": [
+        94,
+        142,
+        107,
+        162
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2213,
+      "bbox": [
+        142,
+        167,
+        234,
+        213
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2196,
+      "bbox": [
+        159,
+        128,
+        177,
+        145
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.219,
+      "bbox": [
+        56,
+        54,
+        166,
+        127
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2175,
+      "bbox": [
+        136,
+        94,
+        159,
+        124
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.215,
+      "bbox": [
+        42,
+        115,
+        146,
+        212
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2135,
+      "bbox": [
+        144,
+        107,
+        157,
+        124
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2134,
+      "bbox": [
+        177,
+        180,
+        234,
+        212
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2099,
+      "bbox": [
+        86,
+        84,
+        140,
+        116
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2095,
+      "bbox": [
+        118,
+        103,
+        139,
+        135
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2095,
+      "bbox": [
+        38,
+        59,
+        79,
+        82
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2094,
+      "bbox": [
+        95,
+        102,
+        177,
+        175
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2085,
+      "bbox": [
+        99,
+        0,
+        129,
+        28
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2085,
+      "bbox": [
+        91,
+        130,
+        108,
+        157
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2085,
+      "bbox": [
+        61,
+        104,
+        79,
+        138
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2079,
+      "bbox": [
+        134,
+        106,
+        157,
+        130
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2077,
+      "bbox": [
+        165,
+        110,
+        189,
+        136
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.207,
+      "bbox": [
+        100,
+        54,
+        126,
+        75
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2056,
+      "bbox": [
+        110,
+        54,
+        149,
+        76
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2055,
+      "bbox": [
+        96,
+        100,
+        130,
+        124
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.205,
+      "bbox": [
+        42,
+        83,
+        64,
+        105
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.205,
+      "bbox": [
+        148,
+        99,
+        168,
+        126
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2048,
+      "bbox": [
+        14,
+        61,
+        33,
+        80
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2018,
+      "bbox": [
+        1,
+        22,
+        65,
+        103
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2009,
+      "bbox": [
+        105,
+        118,
+        177,
+        173
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1997,
+      "bbox": [
+        102,
+        142,
+        131,
+        169
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1996,
+      "bbox": [
+        0,
+        22,
+        37,
+        60
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1979,
+      "bbox": [
+        157,
+        66,
+        190,
+        97
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1966,
+      "bbox": [
+        44,
+        0,
+        65,
+        31
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1949,
+      "bbox": [
+        144,
+        181,
+        234,
+        213
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1924,
+      "bbox": [
+        42,
+        23,
+        69,
+        52
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1921,
+      "bbox": [
+        121,
+        119,
+        132,
+        137
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1921,
+      "bbox": [
+        172,
+        39,
+        185,
+        54
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1914,
+      "bbox": [
+        127,
+        114,
+        145,
+        132
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1898,
+      "bbox": [
+        80,
+        114,
+        108,
+        134
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1884,
+      "bbox": [
+        206,
+        23,
+        235,
+        56
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1871,
+      "bbox": [
+        84,
+        131,
+        108,
+        157
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1871,
+      "bbox": [
+        123,
+        115,
+        145,
+        145
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1858,
+      "bbox": [
+        155,
+        82,
+        178,
+        115
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1848,
+      "bbox": [
+        60,
+        102,
+        90,
+        134
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1848,
+      "bbox": [
+        91,
+        125,
+        114,
+        153
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1844,
+      "bbox": [
+        152,
+        113,
+        172,
+        135
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1812,
+      "bbox": [
+        51,
+        77,
+        79,
+        104
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1804,
+      "bbox": [
+        174,
+        93,
+        191,
+        117
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1802,
+      "bbox": [
+        14,
+        54,
+        36,
+        80
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1798,
+      "bbox": [
+        140,
+        76,
+        167,
+        102
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1797,
+      "bbox": [
+        140,
+        100,
+        157,
+        125
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1795,
+      "bbox": [
+        0,
+        149,
+        36,
+        213
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1782,
+      "bbox": [
+        32,
+        62,
+        64,
+        100
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1773,
+      "bbox": [
+        103,
+        53,
+        125,
+        71
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1772,
+      "bbox": [
+        0,
+        98,
+        27,
+        207
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1771,
+      "bbox": [
+        76,
+        113,
+        155,
+        192
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1768,
+      "bbox": [
+        95,
+        54,
+        118,
+        74
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.175,
+      "bbox": [
+        122,
+        51,
+        155,
+        80
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1748,
+      "bbox": [
+        27,
+        99,
+        138,
+        213
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1746,
+      "bbox": [
+        112,
+        108,
+        128,
+        140
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1737,
+      "bbox": [
+        141,
+        62,
+        169,
+        95
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1733,
+      "bbox": [
+        106,
+        48,
+        132,
+        68
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1732,
+      "bbox": [
+        54,
+        85,
+        87,
+        110
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.173,
+      "bbox": [
+        111,
+        131,
+        135,
+        159
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1721,
+      "bbox": [
+        88,
+        130,
+        144,
+        194
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.171,
+      "bbox": [
+        147,
+        106,
+        234,
+        212
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1707,
+      "bbox": [
+        151,
+        106,
+        172,
+        133
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.17,
+      "bbox": [
+        64,
+        71,
+        89,
+        93
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1699,
+      "bbox": [
+        143,
+        92,
+        161,
+        122
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1692,
+      "bbox": [
+        131,
+        121,
+        177,
+        172
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1689,
+      "bbox": [
+        76,
+        121,
+        93,
+        135
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1688,
+      "bbox": [
+        136,
+        93,
+        188,
+        149
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.167,
+      "bbox": [
+        169,
+        38,
+        185,
+        58
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1663,
+      "bbox": [
+        86,
+        104,
+        118,
+        133
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1663,
+      "bbox": [
+        22,
+        54,
+        58,
+        88
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1657,
+      "bbox": [
+        157,
+        115,
+        173,
+        137
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1655,
+      "bbox": [
+        140,
+        78,
+        227,
+        165
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.165,
+      "bbox": [
+        86,
+        42,
+        117,
+        76
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1645,
+      "bbox": [
+        60,
+        62,
+        89,
+        88
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1635,
+      "bbox": [
+        112,
+        152,
+        129,
+        168
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1623,
+      "bbox": [
+        97,
+        122,
+        155,
+        183
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1611,
+      "bbox": [
+        90,
+        55,
+        116,
+        76
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1598,
+      "bbox": [
+        75,
+        74,
+        100,
+        98
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.159,
+      "bbox": [
+        79,
+        65,
+        99,
+        83
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1589,
+      "bbox": [
+        16,
+        10,
+        42,
+        43
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1583,
+      "bbox": [
+        77,
+        102,
+        168,
+        168
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1579,
+      "bbox": [
+        142,
+        73,
+        189,
+        145
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1571,
+      "bbox": [
+        33,
+        49,
+        60,
+        82
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.156,
+      "bbox": [
+        63,
+        71,
+        81,
+        93
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1543,
+      "bbox": [
+        82,
+        8,
+        98,
+        28
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.154,
+      "bbox": [
+        98,
+        115,
+        121,
+        148
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1537,
+      "bbox": [
+        111,
+        94,
+        139,
+        120
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1536,
+      "bbox": [
+        38,
+        63,
+        69,
+        97
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1532,
+      "bbox": [
+        79,
+        140,
+        97,
+        159
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1525,
+      "bbox": [
+        91,
+        11,
+        126,
+        36
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1507,
+      "bbox": [
+        146,
+        61,
+        170,
+        90
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1507,
+      "bbox": [
+        88,
+        90,
+        137,
+        114
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1505,
+      "bbox": [
+        0,
+        22,
+        17,
+        43
+      ]
+    }
+  ],
+  "summary": {
+    "total": 176,
+    "good_count": 0,
+    "defect_count": 176,
+    "has_defects": true
+  },
+  "total": 176,
+  "good_count": 0,
+  "defect_count": 176,
+  "timings": {
+    "inference_ms": 441.56
+  }
+}

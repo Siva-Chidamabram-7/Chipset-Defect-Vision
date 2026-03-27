@@ -1,0 +1,6 @@
+timestamp=2026-03-27T16:32:54+00:00
+model=best.pt
+inference_ms=1106.69
+status=DEFECT
+defect_count=1
+detection[1] class=solder_bridge confidence=0.6063 bbox=[76, 43, 128, 139]

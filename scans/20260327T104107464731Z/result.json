@@ -1,0 +1,29 @@
+{
+  "status": "DEFECT",
+  "model": "best.pt",
+  "detections": [
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.357,
+      "bbox": [
+        1279,
+        542,
+        1689,
+        895
+      ]
+    }
+  ],
+  "summary": {
+    "total": 1,
+    "good_count": 0,
+    "defect_count": 1,
+    "has_defects": true
+  },
+  "total": 1,
+  "good_count": 0,
+  "defect_count": 1,
+  "timings": {
+    "inference_ms": 85.33
+  }
+}

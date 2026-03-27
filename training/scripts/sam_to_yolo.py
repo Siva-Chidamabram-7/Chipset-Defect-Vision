@@ -44,13 +44,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # ── Class map ─────────────────────────────────────────────────────────────────
 CLASS_MAP: dict[str, int] = {
-    "Missing_hole":    0,
-    "Mouse_bite":      1,
-    "Open_circuit":    2,
-    "Short":           3,
-    "Spur":            4,
-    "Spurious_copper": 5,
-    "Good":            6,
+    "Short":           0,
 }
 
 IMAGE_EXTS: set[str] = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}

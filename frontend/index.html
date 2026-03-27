@@ -1,11 +1,37 @@
 <!DOCTYPE html>
+<!--
+  frontend/index.html — Single-page UI for Chipset Defect Vision.
+
+  Served by FastAPI at GET / (see app/main.py root() handler).
+  Static assets are loaded from /static/ (FastAPI StaticFiles mount).
+
+  Page structure:
+    #loader       — Splash screen shown while app initialises (hidden after runLoader())
+    #app          — Main application shell (hidden until loader completes)
+      header      — Brand + live API status indicator (updated by checkHealth())
+      main
+        .processing-overlay  — Hidden overlay shown during inference (disabled in CSS)
+        .main-container
+          .left-panel (30%)  — Input card (upload/camera) + Preview card
+          .right-panel (70%) — Results card (stats, annotated image, detection list)
+      footer      — Model info updated after /health response
+    #toastContainer — Fixed-position toast notification stack
+
+  Connected to:
+    /static/styles.css?v=3   — glassmorphic dark-theme styles
+    /static/script.js?v=3    — all interactivity (fetch /health, /predict, camera API)
+    Google Fonts CDN          — Inter (body) + JetBrains Mono (monospace elements)
+-->
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Chipset Defect Vision — PCB Solder Inspection</title>
+  <!-- Main stylesheet — versioned to bust browser cache after deployments -->
   <link rel="stylesheet" href="/static/styles.css?v=3" />
+  <!-- Preconnect to Google Fonts CDN to reduce latency for font download -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <!-- Inter: body/UI text | JetBrains Mono: monospace labels, bbox coords, model names -->
   <link
     href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
     rel="stylesheet"

@@ -1,11 +1,40 @@
-path: ../data
+# training/data.yaml — YOLO dataset configuration
+#
+# This file is the single source of truth for:
+#   • class names and their integer indices
+#   • the local dataset root path
+#
+# Consumed by:
+#   training/train.py               — dataset validation and YOLO training call
+#   app/model/predictor.py          — _load_class_names() reads 'names' at import time
+#   training/scripts/sam_to_yolo.py — CLASS_MAP must stay in sync with 'names'
+#
+# Class index order MUST match the integer labels written in data/labels/**/*.txt.
+# Changing index order or adding classes requires re-generating all label files
+# and retraining the model from scratch.
+
+# Absolute path to the dataset root directory.
+# Must contain images/train/, images/val/, labels/train/, labels/val/
+path: D:/Work/Chipset-Defect-Vision/data
+
+# Relative paths inside 'path' pointing to image directories for each split
 train: images/train
-val: images/val
-nc: 6
+val:   images/val
+
+# nc: number of classes — must equal len(names)
+nc: 10
+
+# names: ordered list of class labels (index 0 → 9)
+# These strings are mapped by predictor.py (class ID → display name)
+# and by the frontend labelMap in script.js for human-readable labels.
 names:
-  - missing_hole
-  - mouse_bite
-  - open_circuit
-  - short
-  - spur
-  - spurious_copper
+  - solder_bridge       # 0 — solder connecting pads that should be isolated
+  - mouse_bite          # 1 — irregular edge notch on copper trace
+  - open_circuit        # 2 — broken trace, no electrical contact
+  - short               # 3 — unintended connection between pads/traces
+  - spur                # 4 — thin copper protrusion from a trace
+  - spurious_copper     # 5 — unwanted copper remaining after etching
+  - missing_hole        # 6 — pad missing from the board
+  - excess_solder       # 7 — too much solder on a joint
+  - insufficient_solder # 8 — too little solder on a joint
+  - good                # 9 — correct solder joint (currently removed from inference)

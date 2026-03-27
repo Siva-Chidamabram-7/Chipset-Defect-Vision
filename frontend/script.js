@@ -2,19 +2,48 @@
  * Chipset Defect Vision — Frontend Logic
  * ────────────────────────────────────────
  * Vanilla JS, async/await, zero dependencies.
+ *
+ * Architecture overview:
+ *   • All DOM element references are grabbed once at load time (DOM Refs section).
+ *   • State is tracked in four module-level variables (State section).
+ *   • The INIT block at the bottom runs the startup sequence: loader → health poll.
+ *
+ * Data flow for a scan:
+ *   User selects image (upload or camera) → handleFileSelected / captureFrame
+ *     → showPreview()          (show image in left panel)
+ *     → btnScan click          (user confirms)
+ *     → runInference()         (builds FormData, POST /predict)
+ *     → displayResults()       (render detections in right panel)
+ *
+ * Backend connection:
+ *   All fetch() calls go to API_BASE + route (e.g. /health, /predict).
+ *   API_BASE is empty string by default → same-origin requests served by FastAPI.
+ *   Set API_BASE = 'http://localhost:8000' to point at a separately-running server.
  */
 
 'use strict';
 
 // ── Config ─────────────────────────────────────────────────────────────────
-const API_BASE = '';          // same origin; change to http://localhost:8080 for dev
+// API_BASE: prefix prepended to every fetch URL.  Empty = same origin as the
+// frontend page (FastAPI serves both static files and API from the same port).
+const API_BASE = '';
+// How often the frontend pings GET /health to update the status indicator dot.
 const HEALTH_INTERVAL = 30_000;   // ms between health-checks
 
 // ── Label display mapping ───────────────────────────────────────────────────
 // Maps raw model class names to user-facing display names.
 // Does NOT affect API calls, model weights, or training data.
 const labelMap = {
-  Solder_defect: 'Solder Defect',
+  missing_hole:        'Missing Hole',
+  mouse_bite:          'Mouse Bite',
+  open_circuit:        'Open Circuit',
+  short:               'Solder Short',
+  spur:                'Spur',
+  spurious_copper:     'Spurious Copper',
+  solder_bridge:       'Solder Bridge',
+  excess_solder:       'Excess Solder',
+  insufficient_solder: 'Insufficient Solder',
+  good:                'Good',
 };
 
 // ── DOM Refs ───────────────────────────────────────────────────────────────
@@ -69,63 +98,90 @@ const footerModel     = $('footerModel');
 const toastContainer  = $('toastContainer');
 
 // ── State ──────────────────────────────────────────────────────────────────
-let currentFile       = null;   // File object or null
-let currentDataUrl    = null;   // base64 data URL
-let cameraStream      = null;   // MediaStream or null
-let currentMode       = 'upload';
+// These four variables represent the complete UI state.  All event handlers
+// read/write them to coordinate between the upload, camera, preview, and
+// results sections.
+let currentFile       = null;      // File object from file picker / drag-drop, or null
+let currentDataUrl    = null;      // base64 data-URL string from camera capture, or null
+let cameraStream      = null;      // Live MediaStream while camera is active, or null
+let currentMode       = 'upload';  // 'upload' | 'camera' — which input panel is visible
 
 // ══════════════════════════════════════════════════════════════ LOADER ══════
+// The loader screen is shown on first page load while the browser fetches
+// assets and the server warms up YOLO.  It animates a progress bar through
+// LOADER_STEPS, then fades out and reveals the main app shell.
+// This is purely cosmetic — actual server readiness is checked by checkHealth().
 const LOADER_STEPS = [
-  { pct: 10, msg: 'Loading model weights...' },
-  { pct: 35, msg: 'Initializing inference engine...' },
-  { pct: 60, msg: 'Warming up YOLOv8 pipeline...' },
-  { pct: 85, msg: 'Checking server health...' },
+  { pct: 10,  msg: 'Loading model weights...' },
+  { pct: 35,  msg: 'Initializing inference engine...' },
+  { pct: 60,  msg: 'Warming up YOLOv8 pipeline...' },
+  { pct: 85,  msg: 'Checking server health...' },
   { pct: 100, msg: 'Ready.' },
 ];
 
 async function runLoader() {
+  // Advance progress bar through each step with a short pause
   for (let i = 0; i < LOADER_STEPS.length; i++) {
     const s = LOADER_STEPS[i];
-    loaderBar.style.width   = s.pct + '%';
+    loaderBar.style.width    = s.pct + '%';
     loaderStatus.textContent = s.msg;
+    // Last step gets a shorter pause before the fade-out begins
     await sleep(i === LOADER_STEPS.length - 1 ? 400 : 480);
   }
   await sleep(300);
-  loader.classList.add('fade-out');
-  await sleep(600);
-  loader.classList.add('hidden');
-  app.classList.remove('hidden');
+  loader.classList.add('fade-out');  // CSS opacity transition (0.6s)
+  await sleep(600);                  // wait for fade-out to complete
+  loader.classList.add('hidden');    // remove from layout
+  app.classList.remove('hidden');    // reveal the main app shell
+  // Defer .visible to next paint frame so the CSS transition triggers
   requestAnimationFrame(() => app.classList.add('visible'));
 }
 
 // ══════════════════════════════════════════════════════════════ HEALTH ═══════
+// checkHealth() polls GET /health (see HealthResponse schema in app/schemas.py).
+// Called once after the loader completes, then every HEALTH_INTERVAL ms.
+// Updates the status indicator dot in the header and the footer model label.
 async function checkHealth() {
   try {
+    // 10 s timeout — if the server is slow to start, we show "Offline" briefly
     const res  = await fetch(`${API_BASE}/health`, { signal: AbortSignal.timeout(10_000) });
     const data = await res.json();
     if (data.status === 'ok') {
       setStatus('online', 'System Online');
+      // Show version + model name in footer once model is confirmed loaded
       if (data.model_loaded) footerModel.textContent = `API ${data.version} | Model: ${data.model}`;
     } else {
-      setStatus('offline', 'Degraded');
+      setStatus('offline', 'Degraded');   // server up but model not ready
     }
   } catch (e) {
+    // Network error (server not running) or timeout
     setStatus('offline', `Offline — ${e.name}`);
   }
 }
 
+/**
+ * Update the header status indicator dot and text.
+ * @param {string} cls  - CSS class: 'online' | 'offline'
+ * @param {string} text - Display text next to the dot
+ */
 function setStatus(cls, text) {
-  statusDot.className  = 'status-dot ' + cls;
+  statusDot.className    = 'status-dot ' + cls;
   statusText.textContent = text;
 }
 
 // ══════════════════════════════════════════════════════════════ MODE TOGGLE ═
+// The Input Card has two panels: Upload and Camera.  switchMode() swaps
+// between them and stops the camera stream if the user leaves Camera mode,
+// preventing the browser from keeping the camera active in the background.
 function switchMode(mode) {
   currentMode = mode;
+  // Active button styling
   btnUploadMode.classList.toggle('active', mode === 'upload');
   btnCameraMode.classList.toggle('active', mode === 'camera');
+  // Show/hide the corresponding panel
   uploadPanel.classList.toggle('hidden', mode !== 'upload');
   cameraPanel.classList.toggle('hidden', mode !== 'camera');
+  // Release camera hardware when leaving camera mode
   if (mode !== 'camera' && cameraStream) stopCamera();
 }
 
@@ -328,39 +384,56 @@ function showProcessing(show) {
 }
 
 // ══════════════════════════════════════════════════════════════ RESULTS ══════
+/**
+ * Render a completed PredictionResponse (from POST /predict) into the Results Card.
+ *
+ * Layout updated:
+ *   Left panel  — preview badge updated to "Scanned" (image stays visible)
+ *   Right panel — results card shown with stats, annotated image, detection list
+ *
+ * @param {Object} data - PredictionResponse JSON parsed from the /predict response
+ */
 function displayResults(data) {
-  const detections = data.detections ?? [];
-  const summary = data.summary ?? {};
-  const total = summary.total ?? data.total ?? detections.length;
+  // ── Extract fields with fallbacks for schema evolution ────────────────────
+  // summary.* fields are preferred; top-level duplicates serve as fallbacks
+  // for older API versions that may not include a summary block.
+  const detections   = data.detections ?? [];
+  const summary      = data.summary ?? {};
+  const total        = summary.total        ?? data.total        ?? detections.length;
   const defect_count = summary.defect_count ?? data.defect_count ?? 0;
-  const good_count = summary.good_count ?? data.good_count ?? 0;
+  const good_count   = summary.good_count   ?? data.good_count   ?? 0;
+  // annotated_image_base64 is the primary key; 'image' is the legacy fallback
   const image = data.annotated_image_base64 ?? data.image;
   const model = data.model;
 
-  // Stats
+  // ── Stats row ─────────────────────────────────────────────────────────────
   statTotal.textContent  = total;
   statGood.textContent   = good_count;
   statDefect.textContent = defect_count;
 
   const quality = computeQuality(good_count, defect_count, total);
-  statQuality.textContent        = quality.label;
-  statQuality.style.color        = quality.color;
+  statQuality.textContent = quality.label;
+  statQuality.style.color = quality.color;
 
-  // Annotated image
+  // ── Annotated result image ────────────────────────────────────────────────
+  // image is a plain base64 string — prefix with the data-URL scheme for img.src
   resultImg.src = `data:image/jpeg;base64,${image}`;
 
-  // Footer
+  // ── Footer model label ────────────────────────────────────────────────────
   if (model) footerModel.textContent = `Model: ${model}`;
 
-  // Detection list
+  // ── Detection list ────────────────────────────────────────────────────────
   detectionsList.innerHTML = '';
   if (detections.length === 0) {
+    // No boxes means the model found no regions above the confidence threshold
     detectionsList.innerHTML = '<p class="no-detections">No solder regions detected in this image.</p>';
   } else {
     detections.forEach((det, i) => {
       const item = document.createElement('div');
-      const cssClass = det.label === 'Good' ? 'good' : 'defect'; // red for all non-Good labels
-      const displayLabel = labelMap[det.label] || det.label;      // apply display mapping
+      // Colour coding: 'good' class gets green styling; all other labels are defects
+      const cssClass    = det.label === 'Good' ? 'good' : 'defect';
+      // labelMap translates raw model names (snake_case) to human-readable labels
+      const displayLabel = labelMap[det.label] || det.label;
       item.className = `detection-item ${cssClass}`;
       const [x1,y1,x2,y2] = det.bbox;
       item.innerHTML = `
@@ -369,30 +442,43 @@ function displayResults(data) {
         <span class="di-conf">${(det.confidence * 100).toFixed(1)}%</span>
         <span class="di-bbox">[${x1},${y1} → ${x2},${y2}]</span>
       `;
+      // Stagger entry animation for a cascade reveal effect
       item.style.animationDelay = `${i * 60}ms`;
       detectionsList.appendChild(item);
     });
   }
 
+  // ── Preview badge update ──────────────────────────────────────────────────
   previewBadge.textContent = 'Scanned';
   previewBadge.style.color = 'var(--green)';
 
-  // Show result in right panel — preview stays visible in left panel
+  // Show results card in right panel; left panel preview stays visible
   resultsCard.classList.remove('hidden');
   resultsCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
+  // Toast summary notification
   const msg = defect_count > 0
     ? `⚠ ${defect_count} defect${defect_count > 1 ? 's' : ''} detected`
     : '✓ No defects found';
   toast(msg, defect_count > 0 ? 'error' : 'success');
 }
 
+/**
+ * Compute board quality rating from detection counts.
+ *
+ * Thresholds:
+ *   0 % defects  → PASS (green)
+ *   1–20 % defects → WARN (yellow) — borderline board, needs review
+ *   > 20 % defects → FAIL (red)    — significant defect density
+ *
+ * @returns {{ label: string, color: string }}
+ */
 function computeQuality(good, defect, total) {
-  if (total === 0) return { label: 'N/A', color: 'var(--text-muted)' };
+  if (total === 0)    return { label: 'N/A',  color: 'var(--text-muted)' };
   const ratio = defect / total;
-  if (ratio === 0)      return { label: 'PASS', color: 'var(--green)' };
-  if (ratio <= 0.2)     return { label: 'WARN', color: 'var(--yellow)' };
-  return                       { label: 'FAIL', color: 'var(--red)' };
+  if (ratio === 0)    return { label: 'PASS', color: 'var(--green)' };
+  if (ratio <= 0.2)   return { label: 'WARN', color: 'var(--yellow)' };
+  return                     { label: 'FAIL', color: 'var(--red)' };
 }
 
 // ══════════════════════════════════════════════════════════════ NEW SCAN ═════
@@ -408,6 +494,15 @@ btnNewScan.addEventListener('click', () => {
 });
 
 // ══════════════════════════════════════════════════════════════ TOAST ════════
+/**
+ * Display a transient notification in the bottom-right corner.
+ *
+ * Toasts are appended to #toastContainer, auto-hidden after 3.5 s, then
+ * removed from the DOM after the CSS fade-out transition completes.
+ *
+ * @param {string} msg  - Text to display
+ * @param {string} type - 'info' | 'success' | 'error'
+ */
 function toast(msg, type = 'info') {
   const icons = { info: 'ℹ', success: '✓', error: '✕' };
   const el    = document.createElement('div');
@@ -415,15 +510,21 @@ function toast(msg, type = 'info') {
   el.innerHTML = `<span class="toast-icon">${icons[type] ?? 'ℹ'}</span><span class="toast-msg">${msg}</span>`;
   toastContainer.appendChild(el);
   setTimeout(() => {
-    el.classList.add('hiding');
-    setTimeout(() => el.remove(), 320);
-  }, 3500);
+    el.classList.add('hiding');         // triggers CSS opacity/transform transition
+    setTimeout(() => el.remove(), 320); // remove after transition completes
+  }, 3500);                             // visible duration in ms
 }
 
 // ══════════════════════════════════════════════════════════════ UTILS ═════════
+/** Promisified setTimeout — used to sequence async UI animations. */
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // ══════════════════════════════════════════════════════════════ INIT ══════════
+// IIFE immediately invoked when the script loads (after DOM is ready via defer/end-of-body).
+// Sequence:
+//   1. runLoader() — animate the splash screen, then reveal the app
+//   2. checkHealth() — first health poll; sets the status dot
+//   3. setInterval(checkHealth, …) — continuous background health polling
 (async function init() {
   await runLoader();
   await checkHealth();

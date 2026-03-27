@@ -1,0 +1,568 @@
+{
+  "status": "DEFECT",
+  "model": "best.pt",
+  "detections": [
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.9627,
+      "bbox": [
+        1073,
+        391,
+        1768,
+        1021
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.8905,
+      "bbox": [
+        145,
+        1204,
+        776,
+        1536
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.7143,
+      "bbox": [
+        904,
+        491,
+        1116,
+        777
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.5917,
+      "bbox": [
+        230,
+        57,
+        800,
+        474
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.5679,
+      "bbox": [
+        118,
+        560,
+        1240,
+        1536
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.5351,
+      "bbox": [
+        75,
+        831,
+        794,
+        1536
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.4956,
+      "bbox": [
+        118,
+        624,
+        584,
+        1084
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.4591,
+      "bbox": [
+        1159,
+        2,
+        1981,
+        671
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.4545,
+      "bbox": [
+        532,
+        0,
+        2233,
+        835
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.4079,
+      "bbox": [
+        1114,
+        883,
+        2255,
+        1536
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.3816,
+      "bbox": [
+        57,
+        2,
+        2137,
+        1085
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.3798,
+      "bbox": [
+        32,
+        399,
+        568,
+        1430
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.3716,
+      "bbox": [
+        169,
+        19,
+        1382,
+        516
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.3653,
+      "bbox": [
+        1436,
+        743,
+        2212,
+        1431
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.3477,
+      "bbox": [
+        679,
+        305,
+        2199,
+        1445
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.3335,
+      "bbox": [
+        174,
+        0,
+        721,
+        461
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.331,
+      "bbox": [
+        902,
+        640,
+        1064,
+        770
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.3242,
+      "bbox": [
+        46,
+        591,
+        700,
+        1415
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.316,
+      "bbox": [
+        1041,
+        236,
+        2221,
+        1536
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2929,
+      "bbox": [
+        907,
+        570,
+        1105,
+        774
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2861,
+      "bbox": [
+        123,
+        1169,
+        1139,
+        1536
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2828,
+      "bbox": [
+        1492,
+        1295,
+        1987,
+        1536
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2825,
+      "bbox": [
+        0,
+        149,
+        994,
+        1536
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2762,
+      "bbox": [
+        901,
+        628,
+        1026,
+        769
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2736,
+      "bbox": [
+        1536,
+        1006,
+        1702,
+        1143
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.267,
+      "bbox": [
+        109,
+        516,
+        1887,
+        1536
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2556,
+      "bbox": [
+        157,
+        846,
+        457,
+        1071
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2411,
+      "bbox": [
+        1348,
+        789,
+        2800,
+        1536
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2397,
+      "bbox": [
+        905,
+        370,
+        1785,
+        1236
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2385,
+      "bbox": [
+        1155,
+        272,
+        2743,
+        1536
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2307,
+      "bbox": [
+        3,
+        26,
+        1721,
+        1536
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2207,
+      "bbox": [
+        1404,
+        0,
+        1890,
+        361
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2094,
+      "bbox": [
+        1532,
+        1007,
+        1690,
+        1245
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.2039,
+      "bbox": [
+        934,
+        543,
+        1003,
+        606
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.203,
+      "bbox": [
+        1045,
+        2,
+        2245,
+        764
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1994,
+      "bbox": [
+        535,
+        0,
+        2245,
+        1325
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.199,
+      "bbox": [
+        917,
+        632,
+        1101,
+        789
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1983,
+      "bbox": [
+        323,
+        901,
+        456,
+        1066
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1961,
+      "bbox": [
+        2223,
+        618,
+        2813,
+        1536
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1932,
+      "bbox": [
+        42,
+        6,
+        1622,
+        576
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1876,
+      "bbox": [
+        45,
+        2,
+        998,
+        1148
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1802,
+      "bbox": [
+        1201,
+        0,
+        1878,
+        393
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1687,
+      "bbox": [
+        1400,
+        1128,
+        1895,
+        1454
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1655,
+      "bbox": [
+        732,
+        782,
+        1720,
+        1298
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1602,
+      "bbox": [
+        1044,
+        493,
+        1135,
+        793
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.156,
+      "bbox": [
+        1427,
+        1111,
+        1821,
+        1338
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1549,
+      "bbox": [
+        324,
+        883,
+        443,
+        1021
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1541,
+      "bbox": [
+        965,
+        689,
+        1079,
+        779
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1535,
+      "bbox": [
+        2,
+        2,
+        117,
+        1164
+      ]
+    },
+    {
+      "class": "short",
+      "label": "short",
+      "confidence": 0.1509,
+      "bbox": [
+        156,
+        235,
+        2464,
+        1536
+      ]
+    }
+  ],
+  "summary": {
+    "total": 50,
+    "good_count": 0,
+    "defect_count": 50,
+    "has_defects": true
+  },
+  "total": 50,
+  "good_count": 0,
+  "defect_count": 50,
+  "timings": {
+    "inference_ms": 4252.8
+  }
+}

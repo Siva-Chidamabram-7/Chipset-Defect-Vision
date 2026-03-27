@@ -1,0 +1,6 @@
+timestamp=2026-03-27T16:07:59+00:00
+model=best.pt
+inference_ms=278.78
+status=DEFECT
+defect_count=1
+detection[1] class=missing_hole confidence=0.5471 bbox=[1679, 681, 2034, 970]

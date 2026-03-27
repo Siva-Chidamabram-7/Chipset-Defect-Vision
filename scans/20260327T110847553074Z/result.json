@@ -1,0 +1,17 @@
+{
+  "status": "GOOD",
+  "model": "best.pt",
+  "detections": [],
+  "summary": {
+    "total": 0,
+    "good_count": 0,
+    "defect_count": 0,
+    "has_defects": false
+  },
+  "total": 0,
+  "good_count": 0,
+  "defect_count": 0,
+  "timings": {
+    "inference_ms": 262.68
+  }
+}

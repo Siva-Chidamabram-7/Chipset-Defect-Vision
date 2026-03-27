@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p data/images/train data/images/val data/labels/train data/labels/val)",
+      "Bash(touch data/images/train/.gitkeep data/images/val/.gitkeep data/labels/train/.gitkeep data/labels/val/.gitkeep)",
+      "Bash(python -m py_compile training/train.py)",
+      "Bash(python -m py_compile training/data_sanity_check.py)",
+      "Bash(echo.)",
+      "Bash(python -m py_compile training/vertex_job.py)",
+      "Bash(python -m py_compile training/config.py)",
+      "Read(//mnt/d/Work/**)",
+      "Bash(python3 -m py_compile training/train.py)",
+      "Bash(python3 -m py_compile training/vertex_job.py)",
+      "Bash(python3 -m py_compile training/config.py)",
+      "Bash(python -m py_compile \"D:\\\\Work\\\\Chipset-Defect-Vision\\\\training\\\\train.py\")",
+      "Bash(python -m py_compile \"D:\\\\Work\\\\Chipset-Defect-Vision\\\\training\\\\vertex_job.py\")",
+      "Bash(python -m py_compile \"D:\\\\Work\\\\Chipset-Defect-Vision\\\\training\\\\config.py\")",
+      "Bash(gh auth:*)",
+      "Bash(cmd //c \"dir D:\\\\Work\\\\Chipset-Defect-Vision\\\\output /b\")",
+      "Bash(cut -d' ' -f1 \"D:/Work/Chipset-Defect-Vision/data/labels/train/\"*.txt)",
+      "Bash(cut -d' ' -f1 \"D:/Work/Chipset-Defect-Vision/data/labels/val/\"*.txt)",
+      "Bash(wc -l \"D:/Work/Chipset-Defect-Vision/data/labels/train/\"*.txt)",
+      "Bash(wc -l \"D:/Work/Chipset-Defect-Vision/data/labels/val/\"*.txt)",
+      "Bash(ls images/val/*.jpg)",
+      "Bash(ls labels/train/*.txt)",
+      "Bash(ls labels/val/*.txt)",
+      "Bash(grep \"^6 \" *.txt)",
+      "Bash(ls *.txt)",
+      "Bash(ls Gemini*)"
+    ]
+  }
+}

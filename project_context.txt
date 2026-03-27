@@ -1,0 +1,4349 @@
+--- FILE (Not Dumped): .dockerignore ---
+
+--- OTHER FILE: .env.example ---
+
+--- FILE (Not Dumped): .gitignore ---
+
+--- FILE (Not Dumped): CHANGELOG.md ---
+
+--- FILE (Not Dumped): Dockerfile ---
+
+--- FILE: main.py ---
+"""
+main.py — project-root entry point for the Chipset Defect Vision API.
+
+Exposes the FastAPI `app` object so the service can be started from the
+project root without specifying a package path:
+
+    uvicorn main:app --reload                   # development
+    uvicorn main:app --host 0.0.0.0 --port 8080 # production (local)
+
+The actual application is defined in app/main.py.  This file is a thin
+re-export so that `uvicorn main:app` resolves correctly.
+"""
+
+from app.main import app  # noqa: F401  re-exported for uvicorn
+
+__all__ = ["app"]
+
+
+--- FILE (Not Dumped): README.md ---
+
+--- FILE: requirements.txt ---
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+python-multipart==0.0.9
+ultralytics==8.2.18
+numpy==1.26.4
+pydantic==2.7.1
+
+
+--- OTHER FILE: yolo26n.pt ---
+
+--- OTHER FILE: yolov8m.pt ---
+
+--- OTHER FILE: yolov8n.pt ---
+
+--- OTHER FILE: yolov8s.pt ---
+
+--- FILE: app\config.py ---
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+APP_VERSION = "3.0.0"
+MODEL_NAME = "best.pt"
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+FRONTEND_DIR = PROJECT_ROOT / "frontend"
+WEIGHTS_DIR = PROJECT_ROOT / "weights"
+MODEL_PATH = WEIGHTS_DIR / MODEL_NAME
+INCOMING_DIR = PROJECT_ROOT / "incoming_data"
+SCANS_DIR = PROJECT_ROOT / "scans"
+
+CONFIDENCE_THRESHOLD = float(os.getenv("INFERENCE_CONFIDENCE_THRESHOLD", "0.50"))
+NMS_IOU_THRESHOLD = float(os.getenv("INFERENCE_NMS_IOU_THRESHOLD", "0.45"))
+
+MAX_IMAGE_BYTES = int(os.getenv("MAX_IMAGE_BYTES", str(10 * 1024 * 1024)))
+
+
+--- FILE: app\main.py ---
+from __future__ import annotations
+
+import base64
+import json
+import logging
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from time import perf_counter
+
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+import uvicorn
+
+from app.config import (
+    APP_VERSION,
+    FRONTEND_DIR,
+    INCOMING_DIR,
+    MAX_IMAGE_BYTES,
+    MODEL_NAME,
+    SCANS_DIR,
+)
+from app.model.predictor import SolderDefectPredictor
+from app.schemas import HealthResponse, PredictionResponse
+from app.utils.image_utils import decode_base64_image, decode_image_bytes, validate_image
+
+logger = logging.getLogger("chipset_defect_vision.api")
+
+
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    INCOMING_DIR.mkdir(parents=True, exist_ok=True)
+    SCANS_DIR.mkdir(parents=True, exist_ok=True)
+    application.state.predictor = SolderDefectPredictor()
+    logger.info("Inference service ready")
+    logger.info("Model loaded: %s", application.state.predictor.is_ready())
+    logger.info("Scans directory: %s", SCANS_DIR)
+    yield
+    logger.info("Inference service stopping")
+
+
+app = FastAPI(
+    title="Chipset Defect Vision API",
+    description="Offline-only YOLOv8 PCB defect inference service",
+    version=APP_VERSION,
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
+
+
+@app.get("/", include_in_schema=False)
+async def root():
+    return FileResponse(str(FRONTEND_DIR / "index.html"))
+
+
+@app.get("/health", response_model=HealthResponse)
+async def health(request: Request):
+    predictor: SolderDefectPredictor = request.app.state.predictor
+    return {
+        "status": "ok",
+        "model_loaded": predictor.is_ready(),
+        "model": MODEL_NAME,
+        "version": APP_VERSION,
+    }
+
+
+def _scan_timestamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+
+
+def _create_scan_record(image_bytes: bytes) -> Path:
+    """Create a per-scan directory and save the raw input image. Returns the scan dir Path."""
+    ts = _scan_timestamp()
+    scan_dir = SCANS_DIR / ts
+    scan_dir.mkdir(parents=True, exist_ok=True)
+    (scan_dir / "input.jpg").write_bytes(image_bytes)
+    logger.info("[scan] created record: %s", scan_dir)
+    return scan_dir
+
+
+def _finalise_scan(scan_dir: Path, prediction: dict, inference_ms: float) -> None:
+    """Write output.jpg, result.json, logs.txt, and meta.txt into scan_dir."""
+    ts_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    # output.jpg — annotated image
+    try:
+        annotated_bytes = base64.b64decode(prediction["annotated_image_base64"])
+        (scan_dir / "output.jpg").write_bytes(annotated_bytes)
+    except Exception as exc:
+        logger.warning("[scan] could not save output.jpg: %s", exc)
+
+    # result.json — full result without bulky base64 fields
+    result_slim = {k: v for k, v in prediction.items()
+                   if k not in ("annotated_image_base64", "image")}
+    (scan_dir / "result.json").write_text(
+        json.dumps(result_slim, indent=2), encoding="utf-8"
+    )
+
+    # logs.txt — machine-readable per-scan log
+    defect_count = prediction.get("defect_count", 0)
+    detections = prediction.get("detections", [])
+    log_lines = [
+        f"timestamp={ts_iso}",
+        f"model={MODEL_NAME}",
+        f"inference_ms={inference_ms:.2f}",
+        f"status={prediction.get('status', 'UNKNOWN')}",
+        f"defect_count={defect_count}",
+    ]
+    for i, det in enumerate(detections, 1):
+        log_lines.append(
+            f"detection[{i}] class={det.get('class', det.get('label', '?'))} "
+            f"confidence={det.get('confidence', 0):.4f} "
+            f"bbox={det.get('bbox', [])}"
+        )
+    (scan_dir / "logs.txt").write_text("\n".join(log_lines) + "\n", encoding="utf-8")
+
+    # meta.txt — single human-readable summary line
+    status = prediction.get("status", "UNKNOWN")
+    noun = "defect" if defect_count == 1 else "defects"
+    meta = f"{status} | {defect_count} {noun} | {inference_ms:.1f}ms | {ts_iso}\n"
+    (scan_dir / "meta.txt").write_text(meta, encoding="utf-8")
+
+    logger.info("[scan] finalised: %s — %s", scan_dir.name, meta.strip())
+
+
+@app.post("/predict", response_model=PredictionResponse)
+async def predict(
+    request: Request,
+    file: UploadFile = File(None),
+    image_base64: str = Form(None),
+):
+    predictor: SolderDefectPredictor = request.app.state.predictor
+
+    if (file is None and image_base64 is None) or (file is not None and image_base64 is not None):
+        raise HTTPException(
+            status_code=400,
+            detail="Provide exactly one of 'file' or 'image_base64'.",
+        )
+
+    try:
+        image_bytes = await file.read() if file is not None else decode_base64_image(image_base64)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if len(image_bytes) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="Image payload exceeds the configured size limit.")
+
+    if not validate_image(image_bytes):
+        raise HTTPException(status_code=400, detail="Unsupported image format.")
+
+    try:
+        image_bgr = decode_image_bytes(image_bytes)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    scan_dir = _create_scan_record(image_bytes)
+
+    started_at = perf_counter()
+    try:
+        prediction = predictor.predict(image_bgr)
+    except Exception as exc:
+        logger.exception("[predict] inference failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Inference error: {exc}") from exc
+
+    inference_ms = round((perf_counter() - started_at) * 1000, 2)
+    prediction["timings"] = {"inference_ms": inference_ms}
+
+    _finalise_scan(scan_dir, prediction, inference_ms)
+
+    return prediction
+
+
+if __name__ == "__main__":
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=False)
+
+
+--- FILE: app\schemas.py ---
+from __future__ import annotations
+
+from pydantic import BaseModel, Field
+
+
+class DetectionResult(BaseModel):
+    class_name: str = Field(alias="class")
+    label: str
+    confidence: float
+    bbox: list[int]
+
+    model_config = {"populate_by_name": True}
+
+
+class PredictionSummary(BaseModel):
+    total: int
+    good_count: int
+    defect_count: int
+    has_defects: bool
+
+
+class PredictionTimings(BaseModel):
+    inference_ms: float
+
+
+class PredictionResponse(BaseModel):
+    status: str
+    model: str
+    detections: list[DetectionResult]
+    summary: PredictionSummary
+    total: int
+    good_count: int
+    defect_count: int
+    annotated_image_base64: str
+    image: str
+    timings: PredictionTimings
+
+
+class HealthResponse(BaseModel):
+    status: str
+    model_loaded: bool
+    model: str
+    version: str
+
+
+--- FILE: app\__init__.py ---
+
+
+--- FILE: app\model\predictor.py ---
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import cv2
+import numpy as np
+import yaml
+
+import logging
+
+from app.config import CONFIDENCE_THRESHOLD, MODEL_NAME, MODEL_PATH, NMS_IOU_THRESHOLD
+from app.utils.image_utils import encode_image_to_base64
+
+logger = logging.getLogger("chipset_defect_vision.predictor")
+
+try:
+    from ultralytics import YOLO
+
+    YOLO_AVAILABLE = True
+except ImportError:
+    YOLO_AVAILABLE = False
+
+_DATA_YAML = Path(__file__).resolve().parents[2] / "training" / "data.yaml"
+
+_CLASS_COLORS = [
+    (68, 68, 239),    # 0 missing_hole      — blue/purple
+    (8, 179, 234),    # 1 mouse_bite        — cyan
+    (246, 130, 59),   # 2 open_circuit      — orange
+    (247, 85, 168),   # 3 short             — pink
+    (22, 115, 249),   # 4 spur              — blue
+    (166, 184, 20),   # 5 spurious_copper   — yellow-green
+    (0, 204, 102),    # 6 solder_bridge     — green
+    (255, 191, 0),    # 7 excess_solder     — amber
+    (204, 51, 51),    # 8 insufficient_solder — red
+    (128, 128, 128),  # 9 good              — grey
+]
+
+
+def _load_class_names() -> list[str]:
+    with open(_DATA_YAML) as f:
+        data = yaml.safe_load(f)
+    names = data.get("names", [])
+    if isinstance(names, dict):
+        return [names[i] for i in sorted(names)]
+    return list(names)
+
+
+CLASS_NAMES: list[str] = _load_class_names()
+COLORS: dict[str, tuple[int, int, int]] = {
+    name: _CLASS_COLORS[i % len(_CLASS_COLORS)]
+    for i, name in enumerate(CLASS_NAMES)
+}
+
+
+class SolderDefectPredictor:
+    """Offline-only YOLO predictor that hard-fails unless weights/best.pt exists."""
+
+    def __init__(
+        self,
+        model_path: Path | None = None,
+        confidence_threshold: float = CONFIDENCE_THRESHOLD,
+        iou_threshold: float = NMS_IOU_THRESHOLD,
+    ) -> None:
+        self._model_path = model_path or MODEL_PATH
+        self._confidence_threshold = confidence_threshold
+        self._iou_threshold = iou_threshold
+        self._model = None
+        self._load_model()
+
+    def _load_model(self) -> None:
+        if not YOLO_AVAILABLE:
+            raise RuntimeError(
+                "[Predictor] FATAL: ultralytics is not installed. "
+                "Inference cannot start without it."
+            )
+
+        if not self._model_path.exists():
+            raise RuntimeError(
+                "[Predictor] FATAL: trained model not found.\n"
+                f"Expected: {self._model_path}\n"
+                "The inference service only supports weights/best.pt."
+            )
+
+        self._model = YOLO(str(self._model_path))
+
+    def is_ready(self) -> bool:
+        return self._model is not None
+
+    def predict(self, image_bgr: np.ndarray) -> dict[str, Any]:
+        # Run YOLO with a low internal threshold so we can log everything,
+        # then apply our own strict filter afterwards.
+        _RAW_CONF = 0.10
+        results = self._model.predict(
+            source=image_bgr,
+            conf=_RAW_CONF,
+            iou=self._iou_threshold,
+            save=False,
+            verbose=False,
+        )[0]
+
+        detections: list[dict[str, Any]] = []
+        annotated = image_bgr.copy()
+
+        raw_count = len(results.boxes) if results.boxes is not None else 0
+        filtered_count = 0
+
+        if results.boxes is not None and raw_count > 0:
+            all_scores = sorted(
+                [round(float(b.conf[0]), 3) for b in results.boxes], reverse=True
+            )
+            logger.info(
+                "[predict] model produced %d raw boxes (internal conf>=%.2f, iou<=%.2f)",
+                raw_count, _RAW_CONF, self._iou_threshold,
+            )
+            logger.info(
+                "[predict] confidence distribution: min=%.3f max=%.3f samples=%s",
+                all_scores[-1], all_scores[0],
+                all_scores[:10] if len(all_scores) > 10 else all_scores,
+            )
+
+            for box in results.boxes:
+                confidence = round(float(box.conf[0]), 4)
+
+                # ── Strict post-filter ──
+                if confidence < self._confidence_threshold:
+                    filtered_count += 1
+                    continue
+
+                x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+                class_id = int(box.cls[0])
+                label = CLASS_NAMES[class_id] if class_id < len(CLASS_NAMES) else "unknown"
+                color = COLORS.get(label, (120, 120, 120))
+
+                self._draw_box(annotated, x1, y1, x2, y2, label, confidence, color)
+                detections.append(
+                    {
+                        "class": label,
+                        "label": label,
+                        "confidence": confidence,
+                        "bbox": [x1, y1, x2, y2],
+                    }
+                )
+
+        defect_count = len(detections)
+        status = "DEFECT" if defect_count > 0 else "GOOD"
+
+        logger.info(
+            "[predict] result: %d kept / %d filtered / %d raw | threshold=%.2f | status=%s",
+            defect_count, filtered_count, raw_count,
+            self._confidence_threshold, status,
+        )
+        encoded_image = encode_image_to_base64(annotated)
+
+        summary = {
+            "total": defect_count,
+            "good_count": 0,          # Good class removed; always 0
+            "defect_count": defect_count,
+            "has_defects": defect_count > 0,
+        }
+
+        return {
+            "status": status,
+            "model": MODEL_NAME,
+            "detections": detections,
+            "summary": summary,
+            "total": defect_count,
+            "good_count": 0,
+            "defect_count": defect_count,
+            "annotated_image_base64": encoded_image,
+            "image": encoded_image,
+        }
+
+    @staticmethod
+    def _draw_box(
+        img: np.ndarray,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        label: str,
+        confidence: float,
+        color: tuple[int, int, int],
+    ) -> None:
+        cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+
+        text = f"{label} {confidence:.2f}"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 0.55
+        (text_width, text_height), baseline = cv2.getTextSize(text, font, scale, 1)
+
+        padding = 4
+        cv2.rectangle(
+            img,
+            (x1, y1 - text_height - baseline - padding * 2),
+            (x1 + text_width + padding * 2, y1),
+            color,
+            -1,
+        )
+        cv2.putText(
+            img,
+            text,
+            (x1 + padding, y1 - baseline - padding),
+            font,
+            scale,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+
+
+--- FILE: app\model\__init__.py ---
+
+
+--- FILE: app\utils\image_utils.py ---
+from __future__ import annotations
+
+import base64
+import binascii
+from typing import Final
+
+import cv2
+import numpy as np
+
+IMAGE_MAGIC_BYTES: Final[list[bytes]] = [
+    b"\xff\xd8\xff",          # JPEG
+    b"\x89PNG\r\n\x1a\n",     # PNG
+    b"RIFF",                  # WebP container
+    b"GIF87a",                # GIF
+    b"GIF89a",                # GIF
+]
+
+
+def validate_image(data: bytes) -> bool:
+    """Return True when bytes look like a supported image file."""
+    if not data:
+        return False
+
+    for magic in IMAGE_MAGIC_BYTES:
+        if data[: len(magic)] == magic:
+            return True
+
+    return data[:4] == b"RIFF" and data[8:12] == b"WEBP"
+
+
+def decode_base64_image(b64_string: str) -> bytes:
+    """Decode a base64 image string, removing any data URL prefix."""
+    if not b64_string:
+        raise ValueError("Empty base64 string.")
+
+    if "," in b64_string:
+        b64_string = b64_string.split(",", 1)[1]
+
+    normalized = b64_string.strip()
+    missing = len(normalized) % 4
+    if missing:
+        normalized += "=" * (4 - missing)
+
+    try:
+        return base64.b64decode(normalized, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError(f"Invalid base64 data: {exc}") from exc
+
+
+def decode_image_bytes(data: bytes) -> np.ndarray:
+    """Decode image bytes into a BGR image for OpenCV/YOLO."""
+    if not validate_image(data):
+        raise ValueError("Unsupported image format.")
+
+    buffer = np.frombuffer(data, dtype=np.uint8)
+    image = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
+    if image is None:
+        raise ValueError("Unable to decode image bytes.")
+    return image
+
+
+def encode_image_to_base64(image: np.ndarray) -> str:
+    """Encode an image as a base64 JPEG string."""
+    ok, buffer = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    if not ok:
+        raise ValueError("Unable to encode annotated image.")
+    return base64.b64encode(buffer.tobytes()).decode("utf-8")
+
+
+--- FILE: app\utils\__init__.py ---
+
+
+--- FILE (Not Dumped): data\images\train\.gitkeep ---
+
+--- IMAGE: data\images\train\01_missing_hole_01.jpg ---
+
+--- IMAGE: data\images\train\01_missing_hole_02.jpg ---
+
+--- IMAGE: data\images\train\01_missing_hole_03.jpg ---
+
+--- IMAGE: data\images\train\01_missing_hole_05.jpg ---
+
+--- IMAGE: data\images\train\01_missing_hole_07.jpg ---
+
+--- IMAGE: data\images\train\01_missing_hole_08.jpg ---
+
+--- IMAGE: data\images\train\01_missing_hole_09.jpg ---
+
+--- IMAGE: data\images\train\01_missing_hole_10.jpg ---
+
+--- IMAGE: data\images\train\01_mouse_bite_01.jpg ---
+
+--- IMAGE: data\images\train\01_mouse_bite_02.jpg ---
+
+--- IMAGE: data\images\train\01_mouse_bite_03.jpg ---
+
+--- IMAGE: data\images\train\01_mouse_bite_04.jpg ---
+
+--- IMAGE: data\images\train\01_mouse_bite_05.jpg ---
+
+--- IMAGE: data\images\train\01_mouse_bite_07.jpg ---
+
+--- IMAGE: data\images\train\01_mouse_bite_09.jpg ---
+
+--- IMAGE: data\images\train\01_mouse_bite_10.jpg ---
+
+--- IMAGE: data\images\train\01_open_circuit_01.jpg ---
+
+--- IMAGE: data\images\train\01_open_circuit_02.jpg ---
+
+--- IMAGE: data\images\train\01_open_circuit_03.jpg ---
+
+--- IMAGE: data\images\train\01_open_circuit_04.jpg ---
+
+--- IMAGE: data\images\train\01_open_circuit_05.jpg ---
+
+--- IMAGE: data\images\train\01_open_circuit_06.jpg ---
+
+--- IMAGE: data\images\train\01_open_circuit_07.jpg ---
+
+--- IMAGE: data\images\train\01_open_circuit_10.jpg ---
+
+--- IMAGE: data\images\train\01_short_01.jpg ---
+
+--- IMAGE: data\images\train\01_short_02.jpg ---
+
+--- IMAGE: data\images\train\01_short_03.jpg ---
+
+--- IMAGE: data\images\train\01_short_04.jpg ---
+
+--- IMAGE: data\images\train\01_short_05.jpg ---
+
+--- IMAGE: data\images\train\01_short_06.jpg ---
+
+--- IMAGE: data\images\train\01_short_08.jpg ---
+
+--- IMAGE: data\images\train\01_short_09.jpg ---
+
+--- IMAGE: data\images\train\01_spurious_copper_01.jpg ---
+
+--- IMAGE: data\images\train\01_spurious_copper_02.jpg ---
+
+--- IMAGE: data\images\train\01_spurious_copper_03.jpg ---
+
+--- IMAGE: data\images\train\01_spurious_copper_04.jpg ---
+
+--- IMAGE: data\images\train\01_spurious_copper_05.jpg ---
+
+--- IMAGE: data\images\train\01_spurious_copper_07.jpg ---
+
+--- IMAGE: data\images\train\01_spurious_copper_09.jpg ---
+
+--- IMAGE: data\images\train\01_spurious_copper_10.jpg ---
+
+--- IMAGE: data\images\train\01_spur_02.jpg ---
+
+--- IMAGE: data\images\train\01_spur_03.jpg ---
+
+--- IMAGE: data\images\train\01_spur_04.jpg ---
+
+--- IMAGE: data\images\train\01_spur_05.jpg ---
+
+--- IMAGE: data\images\train\01_spur_06.jpg ---
+
+--- IMAGE: data\images\train\01_spur_07.jpg ---
+
+--- IMAGE: data\images\train\01_spur_08.jpg ---
+
+--- IMAGE: data\images\train\01_spur_10.jpg ---
+
+--- IMAGE: data\images\train\07b724ba-838d-4d9e-8a8a-bb545aa1d8f6-1-_jpg.rf.0f37f5397a7e43101874d11e694276a8.jpg ---
+
+--- IMAGE: data\images\train\07b724ba-838d-4d9e-8a8a-bb545aa1d8f6-1-_jpg.rf.9a143854274683c6f00ed5dc80df93a2.jpg ---
+
+--- IMAGE: data\images\train\07b724ba-838d-4d9e-8a8a-bb545aa1d8f6-1-_jpg.rf.e2ce9b29173f9bdf83ed3b249d452bba.jpg ---
+
+--- IMAGE: data\images\train\16d2eb17-afec-4dba-bbe0-a56a777eda08_jpg.rf.34d529ee9cab9944ea90cc85e851d052.jpg ---
+
+--- IMAGE: data\images\train\16d2eb17-afec-4dba-bbe0-a56a777eda08_jpg.rf.4303b230f674a83d31dd1258ea8944b4.jpg ---
+
+--- IMAGE: data\images\train\16d2eb17-afec-4dba-bbe0-a56a777eda08_jpg.rf.7346a67b5c479e1331eeb644736b4d92.jpg ---
+
+--- IMAGE: data\images\train\20cf4918-e3ab-4089-b6fc-a30032859dae-1-_jpg.rf.072293d543b48e18ad76032ed45993bf.jpg ---
+
+--- IMAGE: data\images\train\20cf4918-e3ab-4089-b6fc-a30032859dae-1-_jpg.rf.2c94316d47131a93cb36a5db22354785.jpg ---
+
+--- IMAGE: data\images\train\20cf4918-e3ab-4089-b6fc-a30032859dae-1-_jpg.rf.c81a2d9235fc8efe32009b89863a1129.jpg ---
+
+--- IMAGE: data\images\train\5188d513-0d6c-4f41-81cc-97781ef166b1-1-_jpg.rf.4299517ed2195d21592812fb69f9c513.jpg ---
+
+--- IMAGE: data\images\train\5188d513-0d6c-4f41-81cc-97781ef166b1-1-_jpg.rf.466668d48b0b7c48f17876d8e3c35893.jpg ---
+
+--- IMAGE: data\images\train\5188d513-0d6c-4f41-81cc-97781ef166b1-1-_jpg.rf.87ab4ef4eedc26d887a50773894b8f4b.jpg ---
+
+--- IMAGE: data\images\train\Gemini_Generated_Image_oj7nkoj7nkoj7nko - Copy (2) - Copy.png ---
+
+--- IMAGE: data\images\train\Gemini_Generated_Image_oj7nkoj7nkoj7nko - Copy (2).png ---
+
+--- IMAGE: data\images\train\Gemini_Generated_Image_oj7nkoj7nkoj7nko - Copy (3) - Copy.png ---
+
+--- IMAGE: data\images\train\Gemini_Generated_Image_oj7nkoj7nkoj7nko - Copy (4) - Copy.png ---
+
+--- IMAGE: data\images\train\Gemini_Generated_Image_oj7nkoj7nkoj7nko - Copy (4).png ---
+
+--- IMAGE: data\images\train\Gemini_Generated_Image_oj7nkoj7nkoj7nko - Copy (5) - Copy.png ---
+
+--- IMAGE: data\images\train\Gemini_Generated_Image_oj7nkoj7nkoj7nko - Copy (6) - Copy.png ---
+
+--- IMAGE: data\images\train\Gemini_Generated_Image_oj7nkoj7nkoj7nko - Copy (6).png ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-18-PM-1-_jpeg.rf.139b3633e26e355994df5d79ad09a11c.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-18-PM-1-_jpeg.rf.2bda81db2a05fef496187cb73802ef81.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-18-PM-1-_jpeg.rf.fdafc4685b342e56d68e1791dfe45ca9.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-18-PM_jpeg.rf.4a472396b7216dceb920e55f7edc6211.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-18-PM_jpeg.rf.85128956e5a7c5292db624d6467e3109.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-18-PM_jpeg.rf.d13ffd17f7bdf2b24993864797c6d2ee.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-19-PM_jpeg.rf.7364bbe8e50135215ce23427ed9fb8ed.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-19-PM_jpeg.rf.9edd00663531bfd30f55fa1be88506ba.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-19-PM_jpeg.rf.d226747866fe825cbe65d69c567fa185.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-20-PM-1-_jpeg.rf.7b88efa5ae98cfc90aacf4e9e1bb4dce.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-20-PM-1-_jpeg.rf.913bd8af4e1c5fb29cedb5190d10d929.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-20-PM-1-_jpeg.rf.ab59fa979e81f66b02813e3c26d66af6.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-20-PM_jpeg.rf.2f206d8a07f7d3cee1aabd2862af76c7.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-20-PM_jpeg.rf.d966c8eec8270d56533e1baf5372f0a3.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-20-PM_jpeg.rf.ec5facc28d2796cb63c4666813c8de5c.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-21-PM-1-_jpeg.rf.04a6eba2500a68aa108c66e73d9c7ff6.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-21-PM-1-_jpeg.rf.23b7b46eb1dea6dbea19408f6488099c.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-21-PM-1-_jpeg.rf.33b93a8b15540f1948befb56c96f36a6.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-21-PM_jpeg.rf.0ef8de1e4b476d5668d913035ae21a0a.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-21-PM_jpeg.rf.66a5c6b59e41836b15b176b427edeec1.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-21-PM_jpeg.rf.f2a79d94330a76cf54077a62aa08ff93.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-23-PM_jpeg.rf.225f948c403906e02748365351c4f1f5.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-23-PM_jpeg.rf.55b618e60180581a379cf9659cbcdda6.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-23-PM_jpeg.rf.97003c4207effb3c3c04e90b178b03a0.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-24-PM-1-_jpeg.rf.0dd0eaf527d0a55a0c4dc6bcd5e43966.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-24-PM-1-_jpeg.rf.6f35e975f92c72a79e3b2f17034726ad.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-24-PM-1-_jpeg.rf.bc132bc9e5fc28c6aad134449a03e401.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-24-PM_jpeg.rf.a5c67f61a50d6e0e2e32c2af5c39c5fe.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-24-PM_jpeg.rf.b3c0e6b1d8eac94c761e1168c74d1fb7.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-24-PM_jpeg.rf.d33c4965026a13d42a091c860f67d312.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-26-PM_jpeg.rf.4e408b2c35587925ee0dc8e54ab1fc1f.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-26-PM_jpeg.rf.bf98388aa65b6c496849353dac2a617d.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-26-PM_jpeg.rf.e92549710dec3e0f257edb25e6a52fdb.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-29-PM-1-_jpeg.rf.473585cfdf5b1c6e89160368a8f91665.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-29-PM-1-_jpeg.rf.6bd1d3e97caef4ca0d00a54b7f0a6a05.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-29-PM-1-_jpeg.rf.b881930f8a870311ffa2eea2e03e24ea.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-29-PM-2-_jpeg.rf.197859cd7b0c5d35e73cbb6a1f25a102.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-29-PM-2-_jpeg.rf.53cbb7d5864115e9a52b2fbdb2a5879b.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-29-PM-2-_jpeg.rf.fda6313c82db4db11acf49a9fdbd9dcb.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-29-PM_jpeg.rf.aee3dfb3f6088253052220e27743570e.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-29-PM_jpeg.rf.c56150c1c56f94e529789edbc37b7eaf.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-47-29-PM_jpeg.rf.cd19a1f12167bec7d69481b8fb5faf35.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-20-PM_jpeg.rf.0b4b800316d5dd948c4d1432fabbead0.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-20-PM_jpeg.rf.87b7b7f116463e7074befbce4e9ac09a.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-20-PM_jpeg.rf.dbff2031154372d2885253fcc9261d9f.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-29-PM_jpeg.rf.7d745afa909bd59f772e0d79851fb1d0.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-29-PM_jpeg.rf.8994c65647a58f0308d81c6a8205aaea.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-29-PM_jpeg.rf.ac4a77d3f676efd357e7dc5f0ca7e2b3.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-30-PM-2-_jpeg.rf.2065da0718b886a79c984f73a918d049.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-30-PM-2-_jpeg.rf.4559f770a753b406e6d691deea2d3bf2.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-30-PM-2-_jpeg.rf.4c45181342a0ad60e7f93c00567c6d06.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-30-PM_jpeg.rf.1dd8ce835fd24bbfb85bb0f500b18a66.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-30-PM_jpeg.rf.8428c6f966dfea97d767a7a676eb03ab.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-30-PM_jpeg.rf.e0b96b39c8c5c5c2fabef5921e30a975.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-31-PM_jpeg.rf.1835013512870796de4153be20990585.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-31-PM_jpeg.rf.e861edcb2a1835a8ddad291f316a7fc8.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-31-PM_jpeg.rf.f48bdb94cfb6a2c9b216b8bc1ce277da.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-32-PM_jpeg.rf.45e3b0da3eef4c97f086f5f79979e4ac.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-32-PM_jpeg.rf.7c826cfdf6a69c204b24753e06b21e0c.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-32-PM_jpeg.rf.b0e1d36fc4c95d5e6f8c31681f1f7fa0.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-33-PM_jpeg.rf.31aec1d3c73a62bb709afe4c2d10e270.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-33-PM_jpeg.rf.72c203f9a7bef1f0b6468f8296d4fff6.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-33-PM_jpeg.rf.f754d9a01022da89431704decc3bbdfc.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-34-PM_jpeg.rf.11d019ed10e943a36e26d794686932f1.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-34-PM_jpeg.rf.57aabae68eb4fbf8dbae0b2c81dd43e4.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-34-PM_jpeg.rf.db68a2bf96c65de75f675fa04f755c1e.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-36-PM-1-_jpeg.rf.279eb8f8d9bbea876777e0e40b01145e.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-36-PM-1-_jpeg.rf.ed4ba85d220a391d3c1a840384aa6030.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-36-PM-1-_jpeg.rf.f14cee24fc6105f815dcfb6628ee4602.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-36-PM_jpeg.rf.30ec21ed3f74ff49427f260cb304e0c1.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-36-PM_jpeg.rf.85149ce82c7eaa49841e29c2d1e2ea87.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-36-PM_jpeg.rf.e4faf1df4cabe772ba73afbbee1a5500.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-37-PM-1-_jpeg.rf.9035dc53679ea0e2e65bdd5ff127fdfe.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-37-PM-1-_jpeg.rf.d5013c222030cd41556df1e785790870.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-37-PM-1-_jpeg.rf.d6c9a1ba0220aaa65d52962cefde2f7c.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-37-PM_jpeg.rf.0cbbfd0a4b2d76203bf38e15cfa771d7.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-37-PM_jpeg.rf.533cdb75b4d67715bd6d348594233b2f.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-37-PM_jpeg.rf.de22dbb130799b954806fddc0ee74c14.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-38-PM_jpeg.rf.470af34fa67aaf01aa5244369d43e815.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-38-PM_jpeg.rf.66c74e82abb6eb3808eef34f0b6ac35f.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-38-PM_jpeg.rf.fa7a0579e751610785987a3b4d849374.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-39-PM-1-_jpeg.rf.10fd192bcd9b331c515ecf1e1c52129e.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-39-PM-1-_jpeg.rf.43bb3b827f472901d04aa15e3a24e9b2.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-39-PM-1-_jpeg.rf.7df7326fa8cc2c9a4d70d91fd26973f2.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-44-PM_jpeg.rf.066dc80a2833cc066c83f310897fe946.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-44-PM_jpeg.rf.873d477adc3d293df1f3f388a2ef70f4.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-44-PM_jpeg.rf.a7a92c900b882519039f92335ca2f0dc.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-58-PM-1-_jpeg.rf.32062acc8156a8ede2b686bba7ce79b6.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-58-PM-1-_jpeg.rf.46c8af9c744a466ba3a8d1bc85064329.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-48-58-PM-1-_jpeg.rf.cf327f7bf3729521b9621bbc2706baed.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-49-00-PM_jpeg.rf.094e5ca067d920d8c5c2f106e842ed3d.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-49-00-PM_jpeg.rf.c18d9fb3c2c8a0cfaf4af67cd6e082e7.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-49-00-PM_jpeg.rf.d50eed592618aa7fbf0be24192cf4e4f.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-49-01-PM-1-_jpeg.rf.49a255eff78b56ae7f14b57637032d14.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-49-01-PM-1-_jpeg.rf.9087d50d9ece9af8565f2aeb85278982.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-49-01-PM-1-_jpeg.rf.994cf0273caf7877fd3a60ef8daec53d.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-49-03-PM_jpeg.rf.8e747b41419ded88c8ee198778e0f99b.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-49-03-PM_jpeg.rf.eef211713bb7d4372f1a3a7b90fe3920.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-49-03-PM_jpeg.rf.ef01834bdb409bc4e837fedacfe67a34.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-49-06-PM_jpeg.rf.0e751d998953c99aaa6dd868f1008d91.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-49-06-PM_jpeg.rf.ef9cd4e149b260a8d8c644d65725b136.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-49-06-PM_jpeg.rf.f2b5617bf5600520f23b96d4d18cfea7.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-49-07-PM-1-_jpeg.rf.45e9635f813cc53cd85ce0f2a6884224.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-49-07-PM-1-_jpeg.rf.4f28dfcbbeea95850bee0d274b7f8ce2.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-49-07-PM-1-_jpeg.rf.dc33a6fbbb6db5d62b03d2e7336c8ae6.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-49-07-PM_jpeg.rf.25940b3a3d4708949ba332e9f9826c84.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-49-07-PM_jpeg.rf.48cbb2f180c4cebb531b4c399d3f6f67.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-49-07-PM_jpeg.rf.c3a8f31f0b7f4c1c48f5bcb52c5abae1.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-49-11-PM_jpeg.rf.53daf937b33657d21f18824bd4a349b8.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-49-11-PM_jpeg.rf.95f1d4631565eecb5f20a4057e5589df.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-49-11-PM_jpeg.rf.da17cbf063f8cb6fc1b5d6fad7d6dd3f.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-49-12-PM_jpeg.rf.585dd1a18d9821a76be36ae98c022bb4.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-49-12-PM_jpeg.rf.5ae24cd28d2ae1290e4fe2bf5966314f.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-49-12-PM_jpeg.rf.647c83723347c72af2b79e12402e4ea6.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-49-27-PM_jpeg.rf.01ceb431a3865f2dce92f54e8ba09a7a.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-49-27-PM_jpeg.rf.1766955be94e6b68b35c0f9c892275f7.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2025-12-31-at-3-49-27-PM_jpeg.rf.f65436892f1a49338e4b31728f510d3e.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-02-PM-1-_jpeg.rf.064dbb94dfebc0448769b5bc2e4e2a7d.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-02-PM-1-_jpeg.rf.b2b7c4088e82b11da2c43e8f7699e3a5.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-02-PM-1-_jpeg.rf.fc12966c28d48b00168c5b1091ddb61f.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-02-PM_jpeg.rf.435be65850aba7be486bcfd1dea6c35e.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-02-PM_jpeg.rf.54709bdfa25d5d6c5b691a628c6e0558.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-02-PM_jpeg.rf.80e367ca129c825802b2a40b633fd8d0.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-03-PM-1-_jpeg.rf.71d1dae74ab3002f8a400fe155ebabeb.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-03-PM-1-_jpeg.rf.cb010fd76c0e43bacaf1fbea69d1425e.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-03-PM-1-_jpeg.rf.fa3c1d06e4e04504fcd5e8dc1646ebd4.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-03-PM_jpeg.rf.7c604c676190529f53e5a594d215f2d5.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-03-PM_jpeg.rf.892646c4794333c0c972d534afb8a0c0.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-03-PM_jpeg.rf.fae34daa27d4e637919a1b2430d5eb8a.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-04-PM-1-_jpeg.rf.75e04a159c5cc971838723e10932c46a.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-04-PM-1-_jpeg.rf.d616aecb520d3e6e949f8c3500b18b48.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-04-PM-1-_jpeg.rf.e5e40f8663b39f2078455e80edf3a236.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-05-PM_jpeg.rf.40b094727b73b21fdfe21c7ea4c8f487.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-05-PM_jpeg.rf.81534f3ed6487c6b42ef4c0459506faa.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-05-PM_jpeg.rf.ea929965cdfb1ff2e8ae27aa1a669236.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-06-PM_jpeg.rf.2f1e0fc707d708e976bd7428c7ecc631.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-06-PM_jpeg.rf.3c8e9d11cc4b080937f9c2b3d7b078c0.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-06-PM_jpeg.rf.aee11e3171bcff0dbd2789bfae28d925.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-07-PM-1-_jpeg.rf.4674dce0193d441a492ed677e8a71fd8.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-07-PM-1-_jpeg.rf.92acc61247a248d07e9e3da55a83da32.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-07-PM-1-_jpeg.rf.ffaf9d43aeaeaf194abe59a5d4618a63.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-07-PM-2-_jpeg.rf.2aa1669b9a221c1491796c2786393a89.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-07-PM-2-_jpeg.rf.551a3ab01569d916acb48d12a14b580b.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-07-PM-2-_jpeg.rf.c3880af4a702b7b886eaf6f56faf0856.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-08-PM_jpeg.rf.30a69886785ccf1b72483cc5aa36a216.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-08-PM_jpeg.rf.9c5bd8d7c580e1f6fa88646d7c583332.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-08-PM_jpeg.rf.da8c9fa9271f7a849c8ac7aecee1b9d0.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-10-PM-1-_jpeg.rf.3edd3390f6eb2416a0d68e4f8c1f6769.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-10-PM-1-_jpeg.rf.9623d5c5d1f754120ec0a821016b2d3e.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-10-PM-1-_jpeg.rf.e2bcc38c64ab0c45f232df402ed1ae49.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-11-PM-1-_jpeg.rf.26a49907267d6a1955adc714e97ef530.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-11-PM-1-_jpeg.rf.4085d78bf1db87763997b1a18073d08f.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-11-PM-1-_jpeg.rf.c6c5d2497375b9ba47dbf47c426301f4.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-11-PM-2-_jpeg.rf.5a567d0ace9e4ebd7f9047a93dab2130.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-11-PM-2-_jpeg.rf.997f5d86aea1a5cf37c7a3e9ea3d84cb.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-11-PM-2-_jpeg.rf.a01fa2894912ff7245b34a95f2306fec.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-14-PM_jpeg.rf.54dc5ba90ceb09a73dc2cbc735e2104c.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-14-PM_jpeg.rf.c9fa6c7bf3d73710a4723e12d6728bcc.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-14-PM_jpeg.rf.e27cc56a711cd2b58e5b47ca8b95818b.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-19-PM_jpeg.rf.4215cf1928787b12aa6e060888ae265a.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-19-PM_jpeg.rf.75b1299c8628d0a628ab633c3d916ca4.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-19-PM_jpeg.rf.f754a4440258b719b1cb135a5d02ecca.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-26-PM-1-_jpeg.rf.267d2e6f95c02d700e6c53f0f4b43277.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-26-PM-1-_jpeg.rf.908aa74c47e09864635e89173002b1d4.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-26-PM-1-_jpeg.rf.d77307fb582657bebbd556a12def0329.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-26-PM_jpeg.rf.8767c30effd4a0d88411fcdad1baba7b.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-26-PM_jpeg.rf.b8233964adb68a1ae1307060f0534657.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-26-PM_jpeg.rf.cf73e85ec72528cbac20490a6218f36b.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-27-PM-1-_jpeg.rf.539bb87d7c1a42dbf080a23cb1211a44.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-27-PM-1-_jpeg.rf.5f198574dcabfe08454e0b7e80af8adb.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-27-PM-1-_jpeg.rf.abc9aad0ce48414aa11dd5c4397f8429.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-28-PM_jpeg.rf.032f6b2c141b7ef07c2b7bfe8b372666.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-28-PM_jpeg.rf.228f3f2e0fa2e82d8708bb310d3e8be4.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-28-PM_jpeg.rf.c77dbf1834c55744dfce27e4cde05a8d.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-29-PM-1-_jpeg.rf.977180ca253cae90fd7368ef93b1772f.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-29-PM-1-_jpeg.rf.dfd8a37350d9166125490384505f7880.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-29-PM-1-_jpeg.rf.ed7d8c09dd3bb677d82d74444f2174d0.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-29-PM-2-_jpeg.rf.0e7093bf81790649361a51aee167ff6b.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-29-PM-2-_jpeg.rf.233dcd6c9c0b7182bcda1a9eb92789fb.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-29-PM-2-_jpeg.rf.72d9e2d47a5371b0ac7ccaddf9407ff6.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-30-PM-1-_jpeg.rf.323f67512256aa8eedf7bebe471b2d7d.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-30-PM-1-_jpeg.rf.4ca53ffc682b6caa8a27c39e5d5b467e.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-30-PM-1-_jpeg.rf.59dc9acb89592f724766bd91b9d1e74e.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-30-PM_jpeg.rf.379ec309d5c672664fe8e104d47fecd6.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-30-PM_jpeg.rf.c1d18892f2689ba111f38be80ad9f23f.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-30-PM_jpeg.rf.dff7d7de9251b3316bfaecb577fdefd8.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-31-PM-1-_jpeg.rf.16a353b4ef11d37c617e6fd93940ecef.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-31-PM-1-_jpeg.rf.a110200dba640c79b4779e4fc24a9e7f.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-31-PM-1-_jpeg.rf.fd2673c9d9b314457bdaeee63eae6fa8.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-31-PM_jpeg.rf.aff5257a95f0584c93e7fc7721ab197f.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-31-PM_jpeg.rf.df52088ea00ebcc176abcca18912395e.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-31-PM_jpeg.rf.e13faeae645b2059e2c4b71d94b5e40a.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-33-PM_jpeg.rf.84c37aba1cddffb4dc867101dfdc9967.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-33-PM_jpeg.rf.b181594cfde3dd9f033192516d7ced3a.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-33-PM_jpeg.rf.d2605a54bf11de1c736acac5ed944cd3.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-34-PM-1-_jpeg.rf.34f37eec1e385918f919a3e9b8bda263.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-34-PM-1-_jpeg.rf.77dbb736f6352ff608e0e352ccbfdf5a.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-34-PM-1-_jpeg.rf.8c8d24a7d8490523a0f1258ef48de71d.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-35-PM-1-_jpeg.rf.1afe315a243bf2028b858db36a4d5eca.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-35-PM-1-_jpeg.rf.392f8a678cd564d0a70fb19b93129889.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-35-PM-1-_jpeg.rf.f91b3199f35f7603ed5ba48dc7e0d897.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-35-PM-2-_jpeg.rf.be0dd50c7b77d7edfc080909f8f9be03.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-35-PM-2-_jpeg.rf.d9b4b2234736aa44f556b5bd1c537290.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-35-PM-2-_jpeg.rf.e4cd80e9c0b5440cce1502cabf97255b.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-35-PM_jpeg.rf.32630e72770e2b3f7c45834e335abbbc.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-35-PM_jpeg.rf.3daf3cf9e598993acb1d99e09acc6246.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-35-PM_jpeg.rf.fbd3c0e7946e33bc739d01b9cbb79513.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-37-PM-1-_jpeg.rf.818eb5d3a2b128f1a11ce5856b56b92e.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-37-PM-1-_jpeg.rf.9dd9b10d97337fe6b28312f8d1424103.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-37-PM-1-_jpeg.rf.e2b97c444a58476fa6f26b56d974bbba.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-38-PM_jpeg.rf.599dcf072793cc38fa1cd27872b41c47.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-38-PM_jpeg.rf.740498c224931b6cc64e1ca06e9f223d.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-38-PM_jpeg.rf.ef42804f0371050e476d180a5ee78843.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-40-PM-1-_jpeg.rf.051d18cefab110c580bd5a7ed224d113.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-40-PM-1-_jpeg.rf.21f2f079fc33da7f4ad32082c24bf3e9.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-40-PM-1-_jpeg.rf.e4100fa91bce398bef1b039e8b6f2d3b.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-47-PM_jpeg.rf.26f2f50bae573f60628299780be25c57.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-47-PM_jpeg.rf.5ab64eacf324865fc21be78dd5f27f1c.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-47-PM_jpeg.rf.a8275e48739f8e8619891818a3189f08.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-48-PM-1-_jpeg.rf.3e8f849e24ac225531b4c91fe1190780.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-48-PM-1-_jpeg.rf.70c9e80691b1115cb5d697a60ed0a089.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-48-PM-1-_jpeg.rf.be7a92f1834a9711b7605f9cc1efe19c.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-49-PM_jpeg.rf.1a5fe6971bf169ede6ccb8f86258cfbd.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-49-PM_jpeg.rf.bb36d8e1ee672fa3e8bf5f1450e7eb9e.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-49-PM_jpeg.rf.ca9bb282d75eb77eb08364a9d8b20cd0.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-50-PM_jpeg.rf.19f5a36593878dd115717d525c373af8.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-50-PM_jpeg.rf.27f75dd8640033d6f0b639e25f3ff658.jpg ---
+
+--- IMAGE: data\images\train\WhatsApp-Image-2026-01-01-at-11-50-50-PM_jpeg.rf.87488c422a80115e118a001512b6f536.jpg ---
+
+--- FILE (Not Dumped): data\images\val\.gitkeep ---
+
+--- IMAGE: data\images\val\01_missing_hole_04.jpg ---
+
+--- IMAGE: data\images\val\01_missing_hole_06.jpg ---
+
+--- IMAGE: data\images\val\01_mouse_bite_06.jpg ---
+
+--- IMAGE: data\images\val\01_mouse_bite_08.jpg ---
+
+--- IMAGE: data\images\val\01_open_circuit_08.jpg ---
+
+--- IMAGE: data\images\val\01_open_circuit_09.jpg ---
+
+--- IMAGE: data\images\val\01_short_07.jpg ---
+
+--- IMAGE: data\images\val\01_short_10.jpg ---
+
+--- IMAGE: data\images\val\01_spurious_copper_06.jpg ---
+
+--- IMAGE: data\images\val\01_spurious_copper_08.jpg ---
+
+--- IMAGE: data\images\val\01_spur_01.jpg ---
+
+--- IMAGE: data\images\val\01_spur_09.jpg ---
+
+--- IMAGE: data\images\val\Gemini_Generated_Image_oj7nkoj7nkoj7nko - Copy (3).png ---
+
+--- IMAGE: data\images\val\Gemini_Generated_Image_oj7nkoj7nkoj7nko - Copy (5).png ---
+
+--- IMAGE: data\images\val\WhatsApp-Image-2025-12-31-at-3-47-22-PM_jpeg.rf.d0932a21cc7e3abb388dc160bcb1c175.jpg ---
+
+--- IMAGE: data\images\val\WhatsApp-Image-2025-12-31-at-3-47-24-PM-2-_jpeg.rf.5ea62f3be56ef08ead050d210346cdc5.jpg ---
+
+--- IMAGE: data\images\val\WhatsApp-Image-2025-12-31-at-3-47-26-PM-1-_jpeg.rf.e12434fbc08a12df2985e81809586e6b.jpg ---
+
+--- IMAGE: data\images\val\WhatsApp-Image-2025-12-31-at-3-47-27-PM_jpeg.rf.bd596c2c5a2a5153f94cbb9de1abd0a6.jpg ---
+
+--- IMAGE: data\images\val\WhatsApp-Image-2025-12-31-at-3-47-28-PM_jpeg.rf.cb89ad4849df10e8d9a5317cf2f9bb4b.jpg ---
+
+--- IMAGE: data\images\val\WhatsApp-Image-2025-12-31-at-3-47-30-PM_jpeg.rf.e1ffd1110e9a4d584808d1cef771216c.jpg ---
+
+--- IMAGE: data\images\val\WhatsApp-Image-2025-12-31-at-3-48-18-PM_jpeg.rf.4dbe9b527fc58b03c99de3e1a7f00584.jpg ---
+
+--- IMAGE: data\images\val\WhatsApp-Image-2025-12-31-at-3-48-22-PM_jpeg.rf.ca70291fbcaee8e39ba599b49b9e11f6.jpg ---
+
+--- IMAGE: data\images\val\WhatsApp-Image-2025-12-31-at-3-48-30-PM-1-_jpeg.rf.b8bf95aadf665e210caf2d3f57c34971.jpg ---
+
+--- IMAGE: data\images\val\WhatsApp-Image-2025-12-31-at-3-48-33-PM-1-_jpeg.rf.f53ccdf7cc1aec3bad4e38335e00a6dc.jpg ---
+
+--- IMAGE: data\images\val\WhatsApp-Image-2025-12-31-at-3-48-49-PM-1-_jpeg.rf.263fe4419d38ff2fb8e1a1bdb105460c.jpg ---
+
+--- IMAGE: data\images\val\WhatsApp-Image-2025-12-31-at-3-48-55-PM-1-_jpeg.rf.883866bdc1b2301f92c07a3efe71d445.jpg ---
+
+--- IMAGE: data\images\val\WhatsApp-Image-2025-12-31-at-3-49-01-PM_jpeg.rf.a1638c8ae94e9cee4c912fce4c2f3e2a.jpg ---
+
+--- IMAGE: data\images\val\WhatsApp-Image-2025-12-31-at-3-49-09-PM_jpeg.rf.c93167c42c7372feef919bc63c1c1138.jpg ---
+
+--- IMAGE: data\images\val\WhatsApp-Image-2025-12-31-at-3-49-16-PM_jpeg.rf.13d18ea7c993e6daab37ec630a3811c0.jpg ---
+
+--- IMAGE: data\images\val\WhatsApp-Image-2026-01-01-at-11-50-04-PM-2-_jpeg.rf.0bea05b6bd44f1ea61d977bbed52db0c.jpg ---
+
+--- IMAGE: data\images\val\WhatsApp-Image-2026-01-01-at-11-50-04-PM_jpeg.rf.05a9163f1ff9058077b7fc397e6f46be.jpg ---
+
+--- IMAGE: data\images\val\WhatsApp-Image-2026-01-01-at-11-50-05-PM-1-_jpeg.rf.7d248cd7038f1d17b310714a9fe4677d.jpg ---
+
+--- IMAGE: data\images\val\WhatsApp-Image-2026-01-01-at-11-50-07-PM_jpeg.rf.7674dd476c7efed20f42fcd08849704e.jpg ---
+
+--- IMAGE: data\images\val\WhatsApp-Image-2026-01-01-at-11-50-08-PM-1-_jpeg.rf.b0f4c22736c67371840568cf6e5efd2e.jpg ---
+
+--- IMAGE: data\images\val\WhatsApp-Image-2026-01-01-at-11-50-30-PM-2-_jpeg.rf.770283bd038497ecd2d13e711618fa7b.jpg ---
+
+--- IMAGE: data\images\val\WhatsApp-Image-2026-01-01-at-11-50-34-PM_jpeg.rf.9087ec29867cd0d7873d5d779f2f557e.jpg ---
+
+--- IMAGE: data\images\val\WhatsApp-Image-2026-01-01-at-11-50-36-PM_jpeg.rf.8d1f06b3655da9d3a695765c8c4bf442.jpg ---
+
+--- IMAGE: data\images\val\WhatsApp-Image-2026-01-01-at-11-50-41-PM_jpeg.rf.d4c9154f4ccbc913d460551f6a0802b3.jpg ---
+
+--- IMAGE: data\images\val\WhatsApp-Image-2026-01-01-at-11-50-45-PM_jpeg.rf.d5d1a6bcea89ba0f96cba041c98f51da.jpg ---
+
+--- IMAGE: data\images\val\WhatsApp-Image-2026-01-01-at-11-50-48-PM_jpeg.rf.18d51495c80900a78cb4e64328a3414d.jpg ---
+
+--- IMAGE: data\images\val\WhatsApp-Image-2026-01-01-at-11-50-51-PM-1-_jpeg.rf.fb078b0a735586a7fd5b821a3c9bb2a0.jpg ---
+
+--- OTHER FILE: data\labels\train.cache ---
+
+--- OTHER FILE: data\labels\val.cache ---
+
+--- FILE (Not Dumped): data\labels\train\.gitkeep ---
+
+--- FILE (Not Dumped): data\labels\train\01_missing_hole_01.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_missing_hole_02.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_missing_hole_03.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_missing_hole_05.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_missing_hole_07.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_missing_hole_08.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_missing_hole_09.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_missing_hole_10.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_mouse_bite_01.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_mouse_bite_02.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_mouse_bite_03.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_mouse_bite_04.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_mouse_bite_05.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_mouse_bite_07.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_mouse_bite_09.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_mouse_bite_10.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_open_circuit_01.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_open_circuit_02.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_open_circuit_03.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_open_circuit_04.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_open_circuit_05.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_open_circuit_06.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_open_circuit_07.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_open_circuit_10.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_short_01.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_short_02.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_short_03.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_short_04.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_short_05.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_short_06.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_short_08.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_short_09.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_spurious_copper_01.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_spurious_copper_02.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_spurious_copper_03.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_spurious_copper_04.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_spurious_copper_05.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_spurious_copper_07.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_spurious_copper_09.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_spurious_copper_10.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_spur_02.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_spur_03.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_spur_04.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_spur_05.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_spur_06.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_spur_07.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_spur_08.txt ---
+
+--- FILE (Not Dumped): data\labels\train\01_spur_10.txt ---
+
+--- FILE (Not Dumped): data\labels\train\07b724ba-838d-4d9e-8a8a-bb545aa1d8f6-1-_jpg.rf.0f37f5397a7e43101874d11e694276a8.txt ---
+
+--- FILE (Not Dumped): data\labels\train\07b724ba-838d-4d9e-8a8a-bb545aa1d8f6-1-_jpg.rf.9a143854274683c6f00ed5dc80df93a2.txt ---
+
+--- FILE (Not Dumped): data\labels\train\07b724ba-838d-4d9e-8a8a-bb545aa1d8f6-1-_jpg.rf.e2ce9b29173f9bdf83ed3b249d452bba.txt ---
+
+--- FILE (Not Dumped): data\labels\train\16d2eb17-afec-4dba-bbe0-a56a777eda08_jpg.rf.34d529ee9cab9944ea90cc85e851d052.txt ---
+
+--- FILE (Not Dumped): data\labels\train\16d2eb17-afec-4dba-bbe0-a56a777eda08_jpg.rf.4303b230f674a83d31dd1258ea8944b4.txt ---
+
+--- FILE (Not Dumped): data\labels\train\16d2eb17-afec-4dba-bbe0-a56a777eda08_jpg.rf.7346a67b5c479e1331eeb644736b4d92.txt ---
+
+--- FILE (Not Dumped): data\labels\train\20cf4918-e3ab-4089-b6fc-a30032859dae-1-_jpg.rf.072293d543b48e18ad76032ed45993bf.txt ---
+
+--- FILE (Not Dumped): data\labels\train\20cf4918-e3ab-4089-b6fc-a30032859dae-1-_jpg.rf.2c94316d47131a93cb36a5db22354785.txt ---
+
+--- FILE (Not Dumped): data\labels\train\20cf4918-e3ab-4089-b6fc-a30032859dae-1-_jpg.rf.c81a2d9235fc8efe32009b89863a1129.txt ---
+
+--- FILE (Not Dumped): data\labels\train\5188d513-0d6c-4f41-81cc-97781ef166b1-1-_jpg.rf.4299517ed2195d21592812fb69f9c513.txt ---
+
+--- FILE (Not Dumped): data\labels\train\5188d513-0d6c-4f41-81cc-97781ef166b1-1-_jpg.rf.466668d48b0b7c48f17876d8e3c35893.txt ---
+
+--- FILE (Not Dumped): data\labels\train\5188d513-0d6c-4f41-81cc-97781ef166b1-1-_jpg.rf.87ab4ef4eedc26d887a50773894b8f4b.txt ---
+
+--- FILE (Not Dumped): data\labels\train\Gemini_Generated_Image_oj7nkoj7nkoj7nko - Copy (2) - Copy.txt ---
+
+--- FILE (Not Dumped): data\labels\train\Gemini_Generated_Image_oj7nkoj7nkoj7nko - Copy (2).txt ---
+
+--- FILE (Not Dumped): data\labels\train\Gemini_Generated_Image_oj7nkoj7nkoj7nko - Copy (3) - Copy.txt ---
+
+--- FILE (Not Dumped): data\labels\train\Gemini_Generated_Image_oj7nkoj7nkoj7nko - Copy (4) - Copy.txt ---
+
+--- FILE (Not Dumped): data\labels\train\Gemini_Generated_Image_oj7nkoj7nkoj7nko - Copy (4).txt ---
+
+--- FILE (Not Dumped): data\labels\train\Gemini_Generated_Image_oj7nkoj7nkoj7nko - Copy (5) - Copy.txt ---
+
+--- FILE (Not Dumped): data\labels\train\Gemini_Generated_Image_oj7nkoj7nkoj7nko - Copy (6) - Copy.txt ---
+
+--- FILE (Not Dumped): data\labels\train\Gemini_Generated_Image_oj7nkoj7nkoj7nko - Copy (6).txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-18-PM-1-_jpeg.rf.139b3633e26e355994df5d79ad09a11c.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-18-PM-1-_jpeg.rf.2bda81db2a05fef496187cb73802ef81.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-18-PM-1-_jpeg.rf.fdafc4685b342e56d68e1791dfe45ca9.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-18-PM_jpeg.rf.4a472396b7216dceb920e55f7edc6211.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-18-PM_jpeg.rf.85128956e5a7c5292db624d6467e3109.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-18-PM_jpeg.rf.d13ffd17f7bdf2b24993864797c6d2ee.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-19-PM_jpeg.rf.7364bbe8e50135215ce23427ed9fb8ed.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-19-PM_jpeg.rf.9edd00663531bfd30f55fa1be88506ba.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-19-PM_jpeg.rf.d226747866fe825cbe65d69c567fa185.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-20-PM-1-_jpeg.rf.7b88efa5ae98cfc90aacf4e9e1bb4dce.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-20-PM-1-_jpeg.rf.913bd8af4e1c5fb29cedb5190d10d929.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-20-PM-1-_jpeg.rf.ab59fa979e81f66b02813e3c26d66af6.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-20-PM_jpeg.rf.2f206d8a07f7d3cee1aabd2862af76c7.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-20-PM_jpeg.rf.d966c8eec8270d56533e1baf5372f0a3.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-20-PM_jpeg.rf.ec5facc28d2796cb63c4666813c8de5c.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-21-PM-1-_jpeg.rf.04a6eba2500a68aa108c66e73d9c7ff6.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-21-PM-1-_jpeg.rf.23b7b46eb1dea6dbea19408f6488099c.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-21-PM-1-_jpeg.rf.33b93a8b15540f1948befb56c96f36a6.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-21-PM_jpeg.rf.0ef8de1e4b476d5668d913035ae21a0a.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-21-PM_jpeg.rf.66a5c6b59e41836b15b176b427edeec1.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-21-PM_jpeg.rf.f2a79d94330a76cf54077a62aa08ff93.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-23-PM_jpeg.rf.225f948c403906e02748365351c4f1f5.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-23-PM_jpeg.rf.55b618e60180581a379cf9659cbcdda6.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-23-PM_jpeg.rf.97003c4207effb3c3c04e90b178b03a0.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-24-PM-1-_jpeg.rf.0dd0eaf527d0a55a0c4dc6bcd5e43966.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-24-PM-1-_jpeg.rf.6f35e975f92c72a79e3b2f17034726ad.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-24-PM-1-_jpeg.rf.bc132bc9e5fc28c6aad134449a03e401.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-24-PM_jpeg.rf.a5c67f61a50d6e0e2e32c2af5c39c5fe.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-24-PM_jpeg.rf.b3c0e6b1d8eac94c761e1168c74d1fb7.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-24-PM_jpeg.rf.d33c4965026a13d42a091c860f67d312.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-26-PM_jpeg.rf.4e408b2c35587925ee0dc8e54ab1fc1f.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-26-PM_jpeg.rf.bf98388aa65b6c496849353dac2a617d.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-26-PM_jpeg.rf.e92549710dec3e0f257edb25e6a52fdb.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-29-PM-1-_jpeg.rf.473585cfdf5b1c6e89160368a8f91665.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-29-PM-1-_jpeg.rf.6bd1d3e97caef4ca0d00a54b7f0a6a05.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-29-PM-1-_jpeg.rf.b881930f8a870311ffa2eea2e03e24ea.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-29-PM-2-_jpeg.rf.197859cd7b0c5d35e73cbb6a1f25a102.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-29-PM-2-_jpeg.rf.53cbb7d5864115e9a52b2fbdb2a5879b.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-29-PM-2-_jpeg.rf.fda6313c82db4db11acf49a9fdbd9dcb.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-29-PM_jpeg.rf.aee3dfb3f6088253052220e27743570e.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-29-PM_jpeg.rf.c56150c1c56f94e529789edbc37b7eaf.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-47-29-PM_jpeg.rf.cd19a1f12167bec7d69481b8fb5faf35.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-20-PM_jpeg.rf.0b4b800316d5dd948c4d1432fabbead0.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-20-PM_jpeg.rf.87b7b7f116463e7074befbce4e9ac09a.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-20-PM_jpeg.rf.dbff2031154372d2885253fcc9261d9f.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-29-PM_jpeg.rf.7d745afa909bd59f772e0d79851fb1d0.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-29-PM_jpeg.rf.8994c65647a58f0308d81c6a8205aaea.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-29-PM_jpeg.rf.ac4a77d3f676efd357e7dc5f0ca7e2b3.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-30-PM-2-_jpeg.rf.2065da0718b886a79c984f73a918d049.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-30-PM-2-_jpeg.rf.4559f770a753b406e6d691deea2d3bf2.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-30-PM-2-_jpeg.rf.4c45181342a0ad60e7f93c00567c6d06.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-30-PM_jpeg.rf.1dd8ce835fd24bbfb85bb0f500b18a66.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-30-PM_jpeg.rf.8428c6f966dfea97d767a7a676eb03ab.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-30-PM_jpeg.rf.e0b96b39c8c5c5c2fabef5921e30a975.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-31-PM_jpeg.rf.1835013512870796de4153be20990585.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-31-PM_jpeg.rf.e861edcb2a1835a8ddad291f316a7fc8.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-31-PM_jpeg.rf.f48bdb94cfb6a2c9b216b8bc1ce277da.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-32-PM_jpeg.rf.45e3b0da3eef4c97f086f5f79979e4ac.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-32-PM_jpeg.rf.7c826cfdf6a69c204b24753e06b21e0c.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-32-PM_jpeg.rf.b0e1d36fc4c95d5e6f8c31681f1f7fa0.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-33-PM_jpeg.rf.31aec1d3c73a62bb709afe4c2d10e270.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-33-PM_jpeg.rf.72c203f9a7bef1f0b6468f8296d4fff6.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-33-PM_jpeg.rf.f754d9a01022da89431704decc3bbdfc.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-34-PM_jpeg.rf.11d019ed10e943a36e26d794686932f1.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-34-PM_jpeg.rf.57aabae68eb4fbf8dbae0b2c81dd43e4.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-34-PM_jpeg.rf.db68a2bf96c65de75f675fa04f755c1e.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-36-PM-1-_jpeg.rf.279eb8f8d9bbea876777e0e40b01145e.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-36-PM-1-_jpeg.rf.ed4ba85d220a391d3c1a840384aa6030.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-36-PM-1-_jpeg.rf.f14cee24fc6105f815dcfb6628ee4602.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-36-PM_jpeg.rf.30ec21ed3f74ff49427f260cb304e0c1.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-36-PM_jpeg.rf.85149ce82c7eaa49841e29c2d1e2ea87.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-36-PM_jpeg.rf.e4faf1df4cabe772ba73afbbee1a5500.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-37-PM-1-_jpeg.rf.9035dc53679ea0e2e65bdd5ff127fdfe.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-37-PM-1-_jpeg.rf.d5013c222030cd41556df1e785790870.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-37-PM-1-_jpeg.rf.d6c9a1ba0220aaa65d52962cefde2f7c.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-37-PM_jpeg.rf.0cbbfd0a4b2d76203bf38e15cfa771d7.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-37-PM_jpeg.rf.533cdb75b4d67715bd6d348594233b2f.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-37-PM_jpeg.rf.de22dbb130799b954806fddc0ee74c14.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-38-PM_jpeg.rf.470af34fa67aaf01aa5244369d43e815.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-38-PM_jpeg.rf.66c74e82abb6eb3808eef34f0b6ac35f.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-38-PM_jpeg.rf.fa7a0579e751610785987a3b4d849374.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-39-PM-1-_jpeg.rf.10fd192bcd9b331c515ecf1e1c52129e.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-39-PM-1-_jpeg.rf.43bb3b827f472901d04aa15e3a24e9b2.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-39-PM-1-_jpeg.rf.7df7326fa8cc2c9a4d70d91fd26973f2.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-44-PM_jpeg.rf.066dc80a2833cc066c83f310897fe946.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-44-PM_jpeg.rf.873d477adc3d293df1f3f388a2ef70f4.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-44-PM_jpeg.rf.a7a92c900b882519039f92335ca2f0dc.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-58-PM-1-_jpeg.rf.32062acc8156a8ede2b686bba7ce79b6.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-58-PM-1-_jpeg.rf.46c8af9c744a466ba3a8d1bc85064329.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-48-58-PM-1-_jpeg.rf.cf327f7bf3729521b9621bbc2706baed.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-49-00-PM_jpeg.rf.094e5ca067d920d8c5c2f106e842ed3d.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-49-00-PM_jpeg.rf.c18d9fb3c2c8a0cfaf4af67cd6e082e7.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-49-00-PM_jpeg.rf.d50eed592618aa7fbf0be24192cf4e4f.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-49-01-PM-1-_jpeg.rf.49a255eff78b56ae7f14b57637032d14.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-49-01-PM-1-_jpeg.rf.9087d50d9ece9af8565f2aeb85278982.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-49-01-PM-1-_jpeg.rf.994cf0273caf7877fd3a60ef8daec53d.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-49-03-PM_jpeg.rf.8e747b41419ded88c8ee198778e0f99b.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-49-03-PM_jpeg.rf.eef211713bb7d4372f1a3a7b90fe3920.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-49-03-PM_jpeg.rf.ef01834bdb409bc4e837fedacfe67a34.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-49-06-PM_jpeg.rf.0e751d998953c99aaa6dd868f1008d91.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-49-06-PM_jpeg.rf.ef9cd4e149b260a8d8c644d65725b136.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-49-06-PM_jpeg.rf.f2b5617bf5600520f23b96d4d18cfea7.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-49-07-PM-1-_jpeg.rf.45e9635f813cc53cd85ce0f2a6884224.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-49-07-PM-1-_jpeg.rf.4f28dfcbbeea95850bee0d274b7f8ce2.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-49-07-PM-1-_jpeg.rf.dc33a6fbbb6db5d62b03d2e7336c8ae6.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-49-07-PM_jpeg.rf.25940b3a3d4708949ba332e9f9826c84.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-49-07-PM_jpeg.rf.48cbb2f180c4cebb531b4c399d3f6f67.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-49-07-PM_jpeg.rf.c3a8f31f0b7f4c1c48f5bcb52c5abae1.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-49-11-PM_jpeg.rf.53daf937b33657d21f18824bd4a349b8.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-49-11-PM_jpeg.rf.95f1d4631565eecb5f20a4057e5589df.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-49-11-PM_jpeg.rf.da17cbf063f8cb6fc1b5d6fad7d6dd3f.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-49-12-PM_jpeg.rf.585dd1a18d9821a76be36ae98c022bb4.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-49-12-PM_jpeg.rf.5ae24cd28d2ae1290e4fe2bf5966314f.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-49-12-PM_jpeg.rf.647c83723347c72af2b79e12402e4ea6.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-49-27-PM_jpeg.rf.01ceb431a3865f2dce92f54e8ba09a7a.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-49-27-PM_jpeg.rf.1766955be94e6b68b35c0f9c892275f7.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2025-12-31-at-3-49-27-PM_jpeg.rf.f65436892f1a49338e4b31728f510d3e.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-02-PM-1-_jpeg.rf.064dbb94dfebc0448769b5bc2e4e2a7d.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-02-PM-1-_jpeg.rf.b2b7c4088e82b11da2c43e8f7699e3a5.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-02-PM-1-_jpeg.rf.fc12966c28d48b00168c5b1091ddb61f.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-02-PM_jpeg.rf.435be65850aba7be486bcfd1dea6c35e.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-02-PM_jpeg.rf.54709bdfa25d5d6c5b691a628c6e0558.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-02-PM_jpeg.rf.80e367ca129c825802b2a40b633fd8d0.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-03-PM-1-_jpeg.rf.71d1dae74ab3002f8a400fe155ebabeb.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-03-PM-1-_jpeg.rf.cb010fd76c0e43bacaf1fbea69d1425e.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-03-PM-1-_jpeg.rf.fa3c1d06e4e04504fcd5e8dc1646ebd4.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-03-PM_jpeg.rf.7c604c676190529f53e5a594d215f2d5.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-03-PM_jpeg.rf.892646c4794333c0c972d534afb8a0c0.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-03-PM_jpeg.rf.fae34daa27d4e637919a1b2430d5eb8a.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-04-PM-1-_jpeg.rf.75e04a159c5cc971838723e10932c46a.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-04-PM-1-_jpeg.rf.d616aecb520d3e6e949f8c3500b18b48.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-04-PM-1-_jpeg.rf.e5e40f8663b39f2078455e80edf3a236.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-05-PM_jpeg.rf.40b094727b73b21fdfe21c7ea4c8f487.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-05-PM_jpeg.rf.81534f3ed6487c6b42ef4c0459506faa.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-05-PM_jpeg.rf.ea929965cdfb1ff2e8ae27aa1a669236.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-06-PM_jpeg.rf.2f1e0fc707d708e976bd7428c7ecc631.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-06-PM_jpeg.rf.3c8e9d11cc4b080937f9c2b3d7b078c0.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-06-PM_jpeg.rf.aee11e3171bcff0dbd2789bfae28d925.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-07-PM-1-_jpeg.rf.4674dce0193d441a492ed677e8a71fd8.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-07-PM-1-_jpeg.rf.92acc61247a248d07e9e3da55a83da32.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-07-PM-1-_jpeg.rf.ffaf9d43aeaeaf194abe59a5d4618a63.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-07-PM-2-_jpeg.rf.2aa1669b9a221c1491796c2786393a89.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-07-PM-2-_jpeg.rf.551a3ab01569d916acb48d12a14b580b.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-07-PM-2-_jpeg.rf.c3880af4a702b7b886eaf6f56faf0856.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-08-PM_jpeg.rf.30a69886785ccf1b72483cc5aa36a216.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-08-PM_jpeg.rf.9c5bd8d7c580e1f6fa88646d7c583332.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-08-PM_jpeg.rf.da8c9fa9271f7a849c8ac7aecee1b9d0.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-10-PM-1-_jpeg.rf.3edd3390f6eb2416a0d68e4f8c1f6769.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-10-PM-1-_jpeg.rf.9623d5c5d1f754120ec0a821016b2d3e.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-10-PM-1-_jpeg.rf.e2bcc38c64ab0c45f232df402ed1ae49.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-11-PM-1-_jpeg.rf.26a49907267d6a1955adc714e97ef530.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-11-PM-1-_jpeg.rf.4085d78bf1db87763997b1a18073d08f.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-11-PM-1-_jpeg.rf.c6c5d2497375b9ba47dbf47c426301f4.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-11-PM-2-_jpeg.rf.5a567d0ace9e4ebd7f9047a93dab2130.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-11-PM-2-_jpeg.rf.997f5d86aea1a5cf37c7a3e9ea3d84cb.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-11-PM-2-_jpeg.rf.a01fa2894912ff7245b34a95f2306fec.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-14-PM_jpeg.rf.54dc5ba90ceb09a73dc2cbc735e2104c.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-14-PM_jpeg.rf.c9fa6c7bf3d73710a4723e12d6728bcc.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-14-PM_jpeg.rf.e27cc56a711cd2b58e5b47ca8b95818b.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-19-PM_jpeg.rf.4215cf1928787b12aa6e060888ae265a.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-19-PM_jpeg.rf.75b1299c8628d0a628ab633c3d916ca4.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-19-PM_jpeg.rf.f754a4440258b719b1cb135a5d02ecca.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-26-PM-1-_jpeg.rf.267d2e6f95c02d700e6c53f0f4b43277.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-26-PM-1-_jpeg.rf.908aa74c47e09864635e89173002b1d4.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-26-PM-1-_jpeg.rf.d77307fb582657bebbd556a12def0329.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-26-PM_jpeg.rf.8767c30effd4a0d88411fcdad1baba7b.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-26-PM_jpeg.rf.b8233964adb68a1ae1307060f0534657.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-26-PM_jpeg.rf.cf73e85ec72528cbac20490a6218f36b.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-27-PM-1-_jpeg.rf.539bb87d7c1a42dbf080a23cb1211a44.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-27-PM-1-_jpeg.rf.5f198574dcabfe08454e0b7e80af8adb.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-27-PM-1-_jpeg.rf.abc9aad0ce48414aa11dd5c4397f8429.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-28-PM_jpeg.rf.032f6b2c141b7ef07c2b7bfe8b372666.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-28-PM_jpeg.rf.228f3f2e0fa2e82d8708bb310d3e8be4.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-28-PM_jpeg.rf.c77dbf1834c55744dfce27e4cde05a8d.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-29-PM-1-_jpeg.rf.977180ca253cae90fd7368ef93b1772f.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-29-PM-1-_jpeg.rf.dfd8a37350d9166125490384505f7880.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-29-PM-1-_jpeg.rf.ed7d8c09dd3bb677d82d74444f2174d0.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-29-PM-2-_jpeg.rf.0e7093bf81790649361a51aee167ff6b.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-29-PM-2-_jpeg.rf.233dcd6c9c0b7182bcda1a9eb92789fb.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-29-PM-2-_jpeg.rf.72d9e2d47a5371b0ac7ccaddf9407ff6.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-30-PM-1-_jpeg.rf.323f67512256aa8eedf7bebe471b2d7d.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-30-PM-1-_jpeg.rf.4ca53ffc682b6caa8a27c39e5d5b467e.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-30-PM-1-_jpeg.rf.59dc9acb89592f724766bd91b9d1e74e.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-30-PM_jpeg.rf.379ec309d5c672664fe8e104d47fecd6.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-30-PM_jpeg.rf.c1d18892f2689ba111f38be80ad9f23f.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-30-PM_jpeg.rf.dff7d7de9251b3316bfaecb577fdefd8.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-31-PM-1-_jpeg.rf.16a353b4ef11d37c617e6fd93940ecef.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-31-PM-1-_jpeg.rf.a110200dba640c79b4779e4fc24a9e7f.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-31-PM-1-_jpeg.rf.fd2673c9d9b314457bdaeee63eae6fa8.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-31-PM_jpeg.rf.aff5257a95f0584c93e7fc7721ab197f.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-31-PM_jpeg.rf.df52088ea00ebcc176abcca18912395e.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-31-PM_jpeg.rf.e13faeae645b2059e2c4b71d94b5e40a.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-33-PM_jpeg.rf.84c37aba1cddffb4dc867101dfdc9967.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-33-PM_jpeg.rf.b181594cfde3dd9f033192516d7ced3a.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-33-PM_jpeg.rf.d2605a54bf11de1c736acac5ed944cd3.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-34-PM-1-_jpeg.rf.34f37eec1e385918f919a3e9b8bda263.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-34-PM-1-_jpeg.rf.77dbb736f6352ff608e0e352ccbfdf5a.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-34-PM-1-_jpeg.rf.8c8d24a7d8490523a0f1258ef48de71d.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-35-PM-1-_jpeg.rf.1afe315a243bf2028b858db36a4d5eca.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-35-PM-1-_jpeg.rf.392f8a678cd564d0a70fb19b93129889.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-35-PM-1-_jpeg.rf.f91b3199f35f7603ed5ba48dc7e0d897.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-35-PM-2-_jpeg.rf.be0dd50c7b77d7edfc080909f8f9be03.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-35-PM-2-_jpeg.rf.d9b4b2234736aa44f556b5bd1c537290.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-35-PM-2-_jpeg.rf.e4cd80e9c0b5440cce1502cabf97255b.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-35-PM_jpeg.rf.32630e72770e2b3f7c45834e335abbbc.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-35-PM_jpeg.rf.3daf3cf9e598993acb1d99e09acc6246.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-35-PM_jpeg.rf.fbd3c0e7946e33bc739d01b9cbb79513.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-37-PM-1-_jpeg.rf.818eb5d3a2b128f1a11ce5856b56b92e.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-37-PM-1-_jpeg.rf.9dd9b10d97337fe6b28312f8d1424103.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-37-PM-1-_jpeg.rf.e2b97c444a58476fa6f26b56d974bbba.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-38-PM_jpeg.rf.599dcf072793cc38fa1cd27872b41c47.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-38-PM_jpeg.rf.740498c224931b6cc64e1ca06e9f223d.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-38-PM_jpeg.rf.ef42804f0371050e476d180a5ee78843.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-40-PM-1-_jpeg.rf.051d18cefab110c580bd5a7ed224d113.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-40-PM-1-_jpeg.rf.21f2f079fc33da7f4ad32082c24bf3e9.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-40-PM-1-_jpeg.rf.e4100fa91bce398bef1b039e8b6f2d3b.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-47-PM_jpeg.rf.26f2f50bae573f60628299780be25c57.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-47-PM_jpeg.rf.5ab64eacf324865fc21be78dd5f27f1c.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-47-PM_jpeg.rf.a8275e48739f8e8619891818a3189f08.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-48-PM-1-_jpeg.rf.3e8f849e24ac225531b4c91fe1190780.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-48-PM-1-_jpeg.rf.70c9e80691b1115cb5d697a60ed0a089.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-48-PM-1-_jpeg.rf.be7a92f1834a9711b7605f9cc1efe19c.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-49-PM_jpeg.rf.1a5fe6971bf169ede6ccb8f86258cfbd.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-49-PM_jpeg.rf.bb36d8e1ee672fa3e8bf5f1450e7eb9e.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-49-PM_jpeg.rf.ca9bb282d75eb77eb08364a9d8b20cd0.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-50-PM_jpeg.rf.19f5a36593878dd115717d525c373af8.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-50-PM_jpeg.rf.27f75dd8640033d6f0b639e25f3ff658.txt ---
+
+--- FILE (Not Dumped): data\labels\train\WhatsApp-Image-2026-01-01-at-11-50-50-PM_jpeg.rf.87488c422a80115e118a001512b6f536.txt ---
+
+--- FILE (Not Dumped): data\labels\val\.gitkeep ---
+
+--- FILE (Not Dumped): data\labels\val\01_missing_hole_04.txt ---
+
+--- FILE (Not Dumped): data\labels\val\01_missing_hole_06.txt ---
+
+--- FILE (Not Dumped): data\labels\val\01_mouse_bite_06.txt ---
+
+--- FILE (Not Dumped): data\labels\val\01_mouse_bite_08.txt ---
+
+--- FILE (Not Dumped): data\labels\val\01_open_circuit_08.txt ---
+
+--- FILE (Not Dumped): data\labels\val\01_open_circuit_09.txt ---
+
+--- FILE (Not Dumped): data\labels\val\01_short_07.txt ---
+
+--- FILE (Not Dumped): data\labels\val\01_short_10.txt ---
+
+--- FILE (Not Dumped): data\labels\val\01_spurious_copper_06.txt ---
+
+--- FILE (Not Dumped): data\labels\val\01_spurious_copper_08.txt ---
+
+--- FILE (Not Dumped): data\labels\val\01_spur_01.txt ---
+
+--- FILE (Not Dumped): data\labels\val\01_spur_09.txt ---
+
+--- FILE (Not Dumped): data\labels\val\Gemini_Generated_Image_oj7nkoj7nkoj7nko - Copy (3).txt ---
+
+--- FILE (Not Dumped): data\labels\val\Gemini_Generated_Image_oj7nkoj7nkoj7nko - Copy (5).txt ---
+
+--- FILE (Not Dumped): data\labels\val\WhatsApp-Image-2025-12-31-at-3-47-22-PM_jpeg.rf.d0932a21cc7e3abb388dc160bcb1c175.txt ---
+
+--- FILE (Not Dumped): data\labels\val\WhatsApp-Image-2025-12-31-at-3-47-24-PM-2-_jpeg.rf.5ea62f3be56ef08ead050d210346cdc5.txt ---
+
+--- FILE (Not Dumped): data\labels\val\WhatsApp-Image-2025-12-31-at-3-47-26-PM-1-_jpeg.rf.e12434fbc08a12df2985e81809586e6b.txt ---
+
+--- FILE (Not Dumped): data\labels\val\WhatsApp-Image-2025-12-31-at-3-47-27-PM_jpeg.rf.bd596c2c5a2a5153f94cbb9de1abd0a6.txt ---
+
+--- FILE (Not Dumped): data\labels\val\WhatsApp-Image-2025-12-31-at-3-47-28-PM_jpeg.rf.cb89ad4849df10e8d9a5317cf2f9bb4b.txt ---
+
+--- FILE (Not Dumped): data\labels\val\WhatsApp-Image-2025-12-31-at-3-47-30-PM_jpeg.rf.e1ffd1110e9a4d584808d1cef771216c.txt ---
+
+--- FILE (Not Dumped): data\labels\val\WhatsApp-Image-2025-12-31-at-3-48-18-PM_jpeg.rf.4dbe9b527fc58b03c99de3e1a7f00584.txt ---
+
+--- FILE (Not Dumped): data\labels\val\WhatsApp-Image-2025-12-31-at-3-48-22-PM_jpeg.rf.ca70291fbcaee8e39ba599b49b9e11f6.txt ---
+
+--- FILE (Not Dumped): data\labels\val\WhatsApp-Image-2025-12-31-at-3-48-30-PM-1-_jpeg.rf.b8bf95aadf665e210caf2d3f57c34971.txt ---
+
+--- FILE (Not Dumped): data\labels\val\WhatsApp-Image-2025-12-31-at-3-48-33-PM-1-_jpeg.rf.f53ccdf7cc1aec3bad4e38335e00a6dc.txt ---
+
+--- FILE (Not Dumped): data\labels\val\WhatsApp-Image-2025-12-31-at-3-48-49-PM-1-_jpeg.rf.263fe4419d38ff2fb8e1a1bdb105460c.txt ---
+
+--- FILE (Not Dumped): data\labels\val\WhatsApp-Image-2025-12-31-at-3-48-55-PM-1-_jpeg.rf.883866bdc1b2301f92c07a3efe71d445.txt ---
+
+--- FILE (Not Dumped): data\labels\val\WhatsApp-Image-2025-12-31-at-3-49-01-PM_jpeg.rf.a1638c8ae94e9cee4c912fce4c2f3e2a.txt ---
+
+--- FILE (Not Dumped): data\labels\val\WhatsApp-Image-2025-12-31-at-3-49-09-PM_jpeg.rf.c93167c42c7372feef919bc63c1c1138.txt ---
+
+--- FILE (Not Dumped): data\labels\val\WhatsApp-Image-2025-12-31-at-3-49-16-PM_jpeg.rf.13d18ea7c993e6daab37ec630a3811c0.txt ---
+
+--- FILE (Not Dumped): data\labels\val\WhatsApp-Image-2026-01-01-at-11-50-04-PM-2-_jpeg.rf.0bea05b6bd44f1ea61d977bbed52db0c.txt ---
+
+--- FILE (Not Dumped): data\labels\val\WhatsApp-Image-2026-01-01-at-11-50-04-PM_jpeg.rf.05a9163f1ff9058077b7fc397e6f46be.txt ---
+
+--- FILE (Not Dumped): data\labels\val\WhatsApp-Image-2026-01-01-at-11-50-05-PM-1-_jpeg.rf.7d248cd7038f1d17b310714a9fe4677d.txt ---
+
+--- FILE (Not Dumped): data\labels\val\WhatsApp-Image-2026-01-01-at-11-50-07-PM_jpeg.rf.7674dd476c7efed20f42fcd08849704e.txt ---
+
+--- FILE (Not Dumped): data\labels\val\WhatsApp-Image-2026-01-01-at-11-50-08-PM-1-_jpeg.rf.b0f4c22736c67371840568cf6e5efd2e.txt ---
+
+--- FILE (Not Dumped): data\labels\val\WhatsApp-Image-2026-01-01-at-11-50-30-PM-2-_jpeg.rf.770283bd038497ecd2d13e711618fa7b.txt ---
+
+--- FILE (Not Dumped): data\labels\val\WhatsApp-Image-2026-01-01-at-11-50-34-PM_jpeg.rf.9087ec29867cd0d7873d5d779f2f557e.txt ---
+
+--- FILE (Not Dumped): data\labels\val\WhatsApp-Image-2026-01-01-at-11-50-36-PM_jpeg.rf.8d1f06b3655da9d3a695765c8c4bf442.txt ---
+
+--- FILE (Not Dumped): data\labels\val\WhatsApp-Image-2026-01-01-at-11-50-41-PM_jpeg.rf.d4c9154f4ccbc913d460551f6a0802b3.txt ---
+
+--- FILE (Not Dumped): data\labels\val\WhatsApp-Image-2026-01-01-at-11-50-45-PM_jpeg.rf.d5d1a6bcea89ba0f96cba041c98f51da.txt ---
+
+--- FILE (Not Dumped): data\labels\val\WhatsApp-Image-2026-01-01-at-11-50-48-PM_jpeg.rf.18d51495c80900a78cb4e64328a3414d.txt ---
+
+--- FILE (Not Dumped): data\labels\val\WhatsApp-Image-2026-01-01-at-11-50-51-PM-1-_jpeg.rf.fb078b0a735586a7fd5b821a3c9bb2a0.txt ---
+
+--- FILE: frontend\index.html ---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chipset Defect Vision — PCB Solder Inspection</title>
+  <link rel="stylesheet" href="/static/styles.css?v=3" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+    rel="stylesheet"
+  />
+</head>
+<body>
+
+  <!-- ═══════════════════════════════════════════════════════════ LOADER ══ -->
+  <div id="loader" class="loader-screen">
+    <div class="loader-bg">
+      <div class="orb orb-1"></div>
+      <div class="orb orb-2"></div>
+      <div class="orb orb-3"></div>
+    </div>
+    <div class="loader-content">
+      <div class="loader-icon">
+        <svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="32" cy="32" r="28" stroke="url(#g1)" stroke-width="2.5"/>
+          <path d="M20 32 L28 40 L44 24" stroke="url(#g2)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+          <defs>
+            <linearGradient id="g1" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+              <stop stop-color="#a78bfa"/>
+              <stop offset="1" stop-color="#38bdf8"/>
+            </linearGradient>
+            <linearGradient id="g2" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+              <stop stop-color="#a78bfa"/>
+              <stop offset="1" stop-color="#38bdf8"/>
+            </linearGradient>
+          </defs>
+        </svg>
+      </div>
+      <div class="loader-spinner">
+        <div class="spinner-ring"></div>
+      </div>
+      <h1 class="loader-title">Initializing Vision System<span class="dots"></span></h1>
+      <p class="loader-sub">Solder Defect Detection Engine · YOLOv8</p>
+      <div class="loader-bar">
+        <div class="loader-bar-fill" id="loaderBar"></div>
+      </div>
+      <p class="loader-status" id="loaderStatus">Loading model weights...</p>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════════ APP ════ -->
+  <div id="app" class="app hidden">
+
+    <!-- Background -->
+    <div class="app-bg">
+      <div class="orb orb-1"></div>
+      <div class="orb orb-2"></div>
+      <div class="orb orb-3"></div>
+      <div class="grid-overlay"></div>
+    </div>
+
+    <!-- Header -->
+    <header class="header">
+      <div class="header-brand">
+        <div class="brand-icon">
+          <svg viewBox="0 0 32 32" fill="none">
+            <rect x="2" y="2" width="28" height="28" rx="6" stroke="url(#hg)" stroke-width="1.5"/>
+            <path d="M8 16 L13 21 L24 10" stroke="url(#hg)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            <defs>
+              <linearGradient id="hg" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
+                <stop stop-color="#a78bfa"/><stop offset="1" stop-color="#38bdf8"/>
+              </linearGradient>
+            </defs>
+          </svg>
+        </div>
+        <div>
+          <span class="brand-name">Chipset Defect Vision</span>
+          <span class="brand-sub">PCB Solder Inspection · YOLOv8</span>
+        </div>
+      </div>
+      <div class="header-status">
+        <span class="status-dot" id="statusDot"></span>
+        <span class="status-text" id="statusText">Connecting...</span>
+      </div>
+    </header>
+
+    <!-- Main -->
+    <main class="main">
+
+      <!-- processing-overlay kept for JS refs; hidden via CSS -->
+      <div class="processing-overlay hidden" id="processingOverlay">
+        <div class="processing-card">
+          <div class="processing-rings">
+            <div class="ring ring-1"></div>
+            <div class="ring ring-2"></div>
+            <div class="ring ring-3"></div>
+            <div class="ring-center">
+              <svg viewBox="0 0 24 24" fill="none"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" stroke="url(#pg)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><defs><linearGradient id="pg" x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse"><stop stop-color="#a78bfa"/><stop offset="1" stop-color="#38bdf8"/></linearGradient></defs></svg>
+            </div>
+          </div>
+          <h3>Analyzing solder integrity<span class="dots"></span></h3>
+          <p>Running YOLOv8 inference pipeline</p>
+          <div class="progress-steps">
+            <div class="step active" id="stepPre">Preprocessing</div>
+            <div class="step-arrow">→</div>
+            <div class="step" id="stepInfer">Inference</div>
+            <div class="step-arrow">→</div>
+            <div class="step" id="stepPost">Post-processing</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Horizontal Split Layout ── -->
+      <div class="main-container">
+
+        <!-- ════ Left Panel (25%) ════ -->
+        <aside class="left-panel">
+
+          <!-- Input Card -->
+          <section class="card input-card" id="inputCard">
+            <div class="card-header">
+              <h2>PCB Image Input</h2>
+              <p>Upload or capture a PCB image</p>
+            </div>
+
+            <!-- Mode Toggle -->
+            <div class="mode-toggle">
+              <button class="mode-btn active" id="btnUploadMode" data-mode="upload">
+                <svg viewBox="0 0 20 20" fill="currentColor"><path d="M16.88 9.1A4 4 0 0 1 16 17H5a5 5 0 0 1-1-9.9V7a3 3 0 0 1 4.52-2.59A4.98 4.98 0 0 1 17 8c0 .38-.04.74-.12 1.1zM11 11h3l-4-4-4 4h3v3h2v-3z"/></svg>
+                Upload
+              </button>
+              <button class="mode-btn" id="btnCameraMode" data-mode="camera">
+                <svg viewBox="0 0 20 20" fill="currentColor"><path d="M4 5a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-1.586l-1.707-1.707A1 1 0 0 0 12 3H8a1 1 0 0 0-.707.293L5.586 5H4zm8 9a3 3 0 1 1 0-6 3 3 0 0 1 0 6z"/></svg>
+                Camera
+              </button>
+            </div>
+
+            <!-- Upload Panel -->
+            <div class="panel upload-panel" id="uploadPanel">
+              <div class="drop-zone" id="dropZone">
+                <div class="drop-icon">
+                  <svg viewBox="0 0 48 48" fill="none"><path d="M24 8V32M16 16l8-8 8 8" stroke="url(#ug)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M8 36h32" stroke="url(#ug)" stroke-width="2.5" stroke-linecap="round"/><defs><linearGradient id="ug" x1="0" y1="0" x2="48" y2="48" gradientUnits="userSpaceOnUse"><stop stop-color="#a78bfa"/><stop offset="1" stop-color="#38bdf8"/></linearGradient></defs></svg>
+                </div>
+                <p class="drop-text">Drop image here</p>
+                <p class="drop-sub">or click to browse</p>
+                <p class="drop-hint">JPG · PNG · WebP</p>
+                <input type="file" id="fileInput" accept="image/*" class="file-input" />
+              </div>
+            </div>
+
+            <!-- Camera Panel -->
+            <div class="panel camera-panel hidden" id="cameraPanel">
+              <div class="camera-viewport" id="cameraViewport">
+                <video id="cameraFeed" autoplay playsinline muted></video>
+                <div class="camera-overlay">
+                  <div class="scan-line"></div>
+                  <div class="corner tl"></div>
+                  <div class="corner tr"></div>
+                  <div class="corner bl"></div>
+                  <div class="corner br"></div>
+                </div>
+                <div class="camera-placeholder" id="cameraPlaceholder">
+                  <svg viewBox="0 0 64 64" fill="none"><circle cx="32" cy="32" r="14" stroke="#a78bfa" stroke-width="1.5"/><path d="M10 20 L10 14 L16 14M48 14 L54 14 L54 20M54 44 L54 50 L48 50M16 50 L10 50 L10 44" stroke="#38bdf8" stroke-width="1.5" stroke-linecap="round"/></svg>
+                  <p>Camera not started</p>
+                </div>
+              </div>
+              <div class="camera-controls">
+                <button class="btn btn-secondary" id="btnStartCamera">
+                  <svg viewBox="0 0 20 20" fill="currentColor"><path d="M4 5a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-1.586l-1.707-1.707A1 1 0 0 0 12 3H8a1 1 0 0 0-.707.293L5.586 5H4zm8 9a3 3 0 1 1 0-6 3 3 0 0 1 0 6z"/></svg>
+                  Start
+                </button>
+                <button class="btn btn-accent hidden" id="btnCapture">
+                  <svg viewBox="0 0 20 20" fill="currentColor"><circle cx="10" cy="10" r="3"/><path d="M10 1a9 9 0 1 0 0 18A9 9 0 0 0 10 1zm0 16a7 7 0 1 1 0-14 7 7 0 0 1 0 14z"/></svg>
+                  Capture
+                </button>
+                <button class="btn btn-danger hidden" id="btnStopCamera">
+                  <svg viewBox="0 0 20 20" fill="currentColor"><rect x="5" y="5" width="10" height="10" rx="1"/></svg>
+                  Stop
+                </button>
+              </div>
+              <canvas id="captureCanvas" class="hidden"></canvas>
+            </div>
+          </section>
+
+          <!-- Preview Card (visible before scan, hidden after scan) -->
+          <section class="card preview-card hidden" id="previewCard">
+            <div class="card-header">
+              <h2>Preview</h2>
+              <button class="btn-ghost" id="btnClearPreview">
+                <svg viewBox="0 0 20 20" fill="currentColor"><path d="M4.293 4.293a1 1 0 0 1 1.414 0L10 8.586l4.293-4.293a1 1 0 1 1 1.414 1.414L11.414 10l4.293 4.293a1 1 0 0 1-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 0 1-1.414-1.414L8.586 10 4.293 5.707a1 1 0 0 1 0-1.414z"/></svg>
+                Clear
+              </button>
+            </div>
+            <div class="preview-wrap">
+              <img id="previewImg" src="" alt="PCB preview" />
+              <div class="preview-badge" id="previewBadge">Ready to scan</div>
+            </div>
+            <button class="btn btn-primary btn-scan" id="btnScan">
+              <svg viewBox="0 0 20 20" fill="currentColor"><path d="M9 9a2 2 0 1 1 4 0 2 2 0 0 1-4 0z"/><path fill-rule="evenodd" d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16zm1-13a4 4 0 0 0-3.446 6.032l-2.261 2.26a1 1 0 1 0 1.414 1.415l2.261-2.261A4 4 0 1 0 11 5z" clip-rule="evenodd"/></svg>
+              Scan Image
+            </button>
+          </section>
+
+        </aside>
+
+        <!-- ════ Right Panel (75%) ════ -->
+        <div class="right-panel">
+
+          <!-- Results Card (visible after scan) -->
+          <section class="card results-card hidden" id="resultsCard">
+            <div class="card-header">
+              <h2>Inspection Results</h2>
+              <button class="btn-ghost" id="btnNewScan">
+                <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M4 2a1 1 0 0 1 1 1v2.101a7.002 7.002 0 0 1 11.601 2.566 1 1 0 1 1-1.885.666A5.002 5.002 0 0 0 5.999 7H9a1 1 0 0 1 0 2H4a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1zm.008 9.057a1 1 0 0 1 1.276.61A5.002 5.002 0 0 0 14.001 13H11a1 1 0 1 1 0-2h5a1 1 0 0 1 1 1v5a1 1 0 1 1-2 0v-2.101a7.002 7.002 0 0 1-11.601-2.566 1 1 0 0 1 .61-1.276z" clip-rule="evenodd"/></svg>
+                New Scan
+              </button>
+            </div>
+
+            <!-- Stats Row -->
+            <div class="stats-row">
+              <div class="stat-card stat-total">
+                <div class="stat-icon">⬡</div>
+                <div class="stat-value" id="statTotal">0</div>
+                <div class="stat-label">Total Detections</div>
+              </div>
+              <div class="stat-card stat-good hidden">
+                <div class="stat-icon">✓</div>
+                <div class="stat-value" id="statGood">0</div>
+                <div class="stat-label">Good Solder</div>
+              </div>
+              <div class="stat-card stat-defect">
+                <div class="stat-icon">⚠</div>
+                <div class="stat-value" id="statDefect">0</div>
+                <div class="stat-label">Defects Found</div>
+              </div>
+              <div class="stat-card stat-quality">
+                <div class="stat-icon">◈</div>
+                <div class="stat-value" id="statQuality">—</div>
+                <div class="stat-label">Board Quality</div>
+              </div>
+            </div>
+
+            <!-- Annotated Image (large, centered) -->
+            <div class="results-image-wrap">
+              <img id="resultImg" src="" alt="Annotated result" />
+              <div class="results-legend">
+                <span class="legend-item legend-good">
+                  <span class="legend-dot"></span>Good
+                </span>
+                <span class="legend-item legend-defect">
+                  <span class="legend-dot"></span>Defect
+                </span>
+              </div>
+            </div>
+
+            <!-- Detection List -->
+            <div class="detections-section">
+              <h3 class="detections-title">Detection Details</h3>
+              <div class="detections-list" id="detectionsList">
+                <p class="no-detections">No detections found.</p>
+              </div>
+            </div>
+          </section>
+
+        </div>
+        <!-- /right-panel -->
+
+      </div>
+      <!-- /main-container -->
+
+    </main>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <span>Chipset Defect Vision · YOLOv8 · FastAPI</span>
+      <span class="footer-sep">·</span>
+      <span id="footerModel">Model: —</span>
+    </footer>
+
+  </div>
+
+  <!-- Toast -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <script src="/static/script.js?v=3"></script>
+</body>
+</html>
+
+
+--- FILE: frontend\script.js ---
+/**
+ * Chipset Defect Vision — Frontend Logic
+ * ────────────────────────────────────────
+ * Vanilla JS, async/await, zero dependencies.
+ */
+
+'use strict';
+
+// ── Config ─────────────────────────────────────────────────────────────────
+const API_BASE = '';          // same origin; change to http://localhost:8080 for dev
+const HEALTH_INTERVAL = 30_000;   // ms between health-checks
+
+// ── Label display mapping ───────────────────────────────────────────────────
+// Maps raw model class names to user-facing display names.
+// Does NOT affect API calls, model weights, or training data.
+const labelMap = {
+  missing_hole:        'Missing Hole',
+  mouse_bite:          'Mouse Bite',
+  open_circuit:        'Open Circuit',
+  short:               'Solder Short',
+  spur:                'Spur',
+  spurious_copper:     'Spurious Copper',
+  solder_bridge:       'Solder Bridge',
+  excess_solder:       'Excess Solder',
+  insufficient_solder: 'Insufficient Solder',
+  good:                'Good',
+};
+
+// ── DOM Refs ───────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+
+const loader          = $('loader');
+const loaderBar       = $('loaderBar');
+const loaderStatus    = $('loaderStatus');
+const app             = $('app');
+
+const statusDot       = $('statusDot');
+const statusText      = $('statusText');
+
+const btnUploadMode   = $('btnUploadMode');
+const btnCameraMode   = $('btnCameraMode');
+const uploadPanel     = $('uploadPanel');
+const cameraPanel     = $('cameraPanel');
+
+const dropZone        = $('dropZone');
+const fileInput       = $('fileInput');
+
+const cameraFeed      = $('cameraFeed');
+const cameraViewport  = $('cameraViewport');
+const cameraPlaceholder=$('cameraPlaceholder');
+const captureCanvas   = $('captureCanvas');
+const btnStartCamera  = $('btnStartCamera');
+const btnCapture      = $('btnCapture');
+const btnStopCamera   = $('btnStopCamera');
+
+const inputCard       = $('inputCard');
+const previewCard     = $('previewCard');
+const previewImg      = $('previewImg');
+const previewBadge    = $('previewBadge');
+const btnScan         = $('btnScan');
+const btnClearPreview = $('btnClearPreview');
+
+const processingOverlay = $('processingOverlay');
+const stepPre           = $('stepPre');
+const stepInfer         = $('stepInfer');
+const stepPost          = $('stepPost');
+
+const resultsCard     = $('resultsCard');
+const statTotal       = $('statTotal');
+const statGood        = $('statGood');
+const statDefect      = $('statDefect');
+const statQuality     = $('statQuality');
+const resultImg       = $('resultImg');
+const detectionsList  = $('detectionsList');
+const btnNewScan      = $('btnNewScan');
+const footerModel     = $('footerModel');
+
+const toastContainer  = $('toastContainer');
+
+// ── State ──────────────────────────────────────────────────────────────────
+let currentFile       = null;   // File object or null
+let currentDataUrl    = null;   // base64 data URL
+let cameraStream      = null;   // MediaStream or null
+let currentMode       = 'upload';
+
+// ══════════════════════════════════════════════════════════════ LOADER ══════
+const LOADER_STEPS = [
+  { pct: 10, msg: 'Loading model weights...' },
+  { pct: 35, msg: 'Initializing inference engine...' },
+  { pct: 60, msg: 'Warming up YOLOv8 pipeline...' },
+  { pct: 85, msg: 'Checking server health...' },
+  { pct: 100, msg: 'Ready.' },
+];
+
+async function runLoader() {
+  for (let i = 0; i < LOADER_STEPS.length; i++) {
+    const s = LOADER_STEPS[i];
+    loaderBar.style.width   = s.pct + '%';
+    loaderStatus.textContent = s.msg;
+    await sleep(i === LOADER_STEPS.length - 1 ? 400 : 480);
+  }
+  await sleep(300);
+  loader.classList.add('fade-out');
+  await sleep(600);
+  loader.classList.add('hidden');
+  app.classList.remove('hidden');
+  requestAnimationFrame(() => app.classList.add('visible'));
+}
+
+// ══════════════════════════════════════════════════════════════ HEALTH ═══════
+async function checkHealth() {
+  try {
+    const res  = await fetch(`${API_BASE}/health`, { signal: AbortSignal.timeout(10_000) });
+    const data = await res.json();
+    if (data.status === 'ok') {
+      setStatus('online', 'System Online');
+      if (data.model_loaded) footerModel.textContent = `API ${data.version} | Model: ${data.model}`;
+    } else {
+      setStatus('offline', 'Degraded');
+    }
+  } catch (e) {
+    setStatus('offline', `Offline — ${e.name}`);
+  }
+}
+
+function setStatus(cls, text) {
+  statusDot.className  = 'status-dot ' + cls;
+  statusText.textContent = text;
+}
+
+// ══════════════════════════════════════════════════════════════ MODE TOGGLE ═
+function switchMode(mode) {
+  currentMode = mode;
+  btnUploadMode.classList.toggle('active', mode === 'upload');
+  btnCameraMode.classList.toggle('active', mode === 'camera');
+  uploadPanel.classList.toggle('hidden', mode !== 'upload');
+  cameraPanel.classList.toggle('hidden', mode !== 'camera');
+  if (mode !== 'camera' && cameraStream) stopCamera();
+}
+
+btnUploadMode.addEventListener('click', () => switchMode('upload'));
+btnCameraMode.addEventListener('click', () => switchMode('camera'));
+
+// ══════════════════════════════════════════════════════════════ UPLOAD ═══════
+dropZone.addEventListener('click', e => {
+  if (e.target !== fileInput) fileInput.click();
+});
+
+fileInput.addEventListener('change', e => {
+  const file = e.target.files?.[0];
+  if (file) handleFileSelected(file);
+});
+
+dropZone.addEventListener('dragover', e => {
+  e.preventDefault();
+  dropZone.classList.add('dragging');
+});
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragging'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('dragging');
+  const file = e.dataTransfer?.files?.[0];
+  if (file && file.type.startsWith('image/')) {
+    handleFileSelected(file);
+  } else {
+    toast('Please drop a valid image file.', 'error');
+  }
+});
+
+function handleFileSelected(file) {
+  if (!file.type.startsWith('image/')) {
+    toast('Invalid file type. Please select an image.', 'error');
+    return;
+  }
+  currentFile    = file;
+  currentDataUrl = null;
+  const reader   = new FileReader();
+  reader.onload  = e => showPreview(e.target.result);
+  reader.readAsDataURL(file);
+}
+
+// ══════════════════════════════════════════════════════════════ CAMERA ════════
+async function startCamera() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    toast('Camera API not supported in this browser.', 'error');
+    return;
+  }
+  try {
+    cameraStream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'environment' },
+    });
+    cameraFeed.srcObject = cameraStream;
+    await cameraFeed.play();
+
+    cameraPlaceholder.classList.add('hidden');
+    cameraViewport.classList.add('active');
+
+    btnStartCamera.classList.add('hidden');
+    btnCapture.classList.remove('hidden');
+    btnStopCamera.classList.remove('hidden');
+    toast('Camera started', 'success');
+  } catch (err) {
+    const msg = err.name === 'NotAllowedError'
+      ? 'Camera permission denied. Please allow access.'
+      : `Camera error: ${err.message}`;
+    toast(msg, 'error');
+  }
+}
+
+function captureFrame() {
+  if (!cameraStream) return;
+  const video  = cameraFeed;
+  const canvas = captureCanvas;
+  canvas.width  = video.videoWidth  || 640;
+  canvas.height = video.videoHeight || 480;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+  currentFile    = null;
+  currentDataUrl = dataUrl;
+  showPreview(dataUrl);
+  toast('Frame captured', 'success');
+}
+
+function stopCamera() {
+  cameraStream?.getTracks().forEach(t => t.stop());
+  cameraStream = null;
+  cameraFeed.srcObject = null;
+  cameraViewport.classList.remove('active');
+  cameraPlaceholder.classList.remove('hidden');
+  btnStartCamera.classList.remove('hidden');
+  btnCapture.classList.add('hidden');
+  btnStopCamera.classList.add('hidden');
+}
+
+btnStartCamera.addEventListener('click', startCamera);
+btnCapture.addEventListener('click',     captureFrame);
+btnStopCamera.addEventListener('click',  stopCamera);
+
+// ══════════════════════════════════════════════════════════════ PREVIEW ════════
+function showPreview(dataUrl) {
+  previewImg.src        = dataUrl;
+  previewBadge.textContent = 'Ready to scan';
+  previewBadge.style.color = '';
+  previewCard.classList.remove('hidden');
+  resultsCard.classList.add('hidden');
+  previewCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+btnClearPreview.addEventListener('click', () => {
+  currentFile    = null;
+  currentDataUrl = null;
+  fileInput.value = '';
+  previewCard.classList.add('hidden');
+  resultsCard.classList.add('hidden');
+});
+
+// ══════════════════════════════════════════════════════════════ SCAN ══════════
+btnScan.addEventListener('click', async () => {
+  if (!currentFile && !currentDataUrl) {
+    toast('No image selected.', 'error');
+    return;
+  }
+  await runInference();
+});
+
+async function runInference() {
+  showProcessing(true);
+  animateStep('pre');
+
+  try {
+    let body;
+    if (currentFile) {
+      body = new FormData();
+      body.append('file', currentFile);
+    } else {
+      body = new FormData();
+      // Strip data-URL prefix → raw base64
+      const b64 = currentDataUrl.includes(',')
+        ? currentDataUrl.split(',')[1]
+        : currentDataUrl;
+      body.append('image_base64', b64);
+    }
+
+    await sleep(600);
+    animateStep('infer');
+
+    const res = await fetch(`${API_BASE}/predict`, {
+      method: 'POST',
+      body,
+      signal: AbortSignal.timeout(60_000),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail || 'Server error');
+    }
+
+    const data = await res.json();
+    await sleep(400);
+    animateStep('post');
+    await sleep(500);
+
+    showProcessing(false);
+    displayResults(data);
+
+  } catch (err) {
+    showProcessing(false);
+    const msg = err.name === 'TimeoutError'
+      ? 'Request timed out. Is the server running?'
+      : err.name === 'TypeError'
+        ? `Network error — is the server running? (${err.message})`
+        : err.message;
+    toast(msg, 'error');
+    previewBadge.textContent = 'Scan failed';
+    previewBadge.style.color = 'var(--red)';
+  }
+}
+
+function animateStep(step) {
+  [stepPre, stepInfer, stepPost].forEach(el => el.classList.remove('active', 'done'));
+  const map = { pre: [stepPre], infer: [stepPre, stepInfer], post: [stepPre, stepInfer, stepPost] };
+  const all = [stepPre, stepInfer, stepPost];
+  const active = { pre: stepPre, infer: stepInfer, post: stepPost }[step];
+  all.forEach((el, i) => {
+    if (map[step].includes(el)) {
+      el.classList.add(el === active ? 'active' : 'done');
+    }
+  });
+}
+
+function showProcessing(show) {
+  processingOverlay.classList.toggle('hidden', !show);
+  if (show) {
+    [stepPre, stepInfer, stepPost].forEach(el => el.classList.remove('active','done'));
+  }
+}
+
+// ══════════════════════════════════════════════════════════════ RESULTS ══════
+function displayResults(data) {
+  const detections = data.detections ?? [];
+  const summary = data.summary ?? {};
+  const total = summary.total ?? data.total ?? detections.length;
+  const defect_count = summary.defect_count ?? data.defect_count ?? 0;
+  const good_count = summary.good_count ?? data.good_count ?? 0;
+  const image = data.annotated_image_base64 ?? data.image;
+  const model = data.model;
+
+  // Stats
+  statTotal.textContent  = total;
+  statGood.textContent   = good_count;
+  statDefect.textContent = defect_count;
+
+  const quality = computeQuality(good_count, defect_count, total);
+  statQuality.textContent        = quality.label;
+  statQuality.style.color        = quality.color;
+
+  // Annotated image
+  resultImg.src = `data:image/jpeg;base64,${image}`;
+
+  // Footer
+  if (model) footerModel.textContent = `Model: ${model}`;
+
+  // Detection list
+  detectionsList.innerHTML = '';
+  if (detections.length === 0) {
+    detectionsList.innerHTML = '<p class="no-detections">No solder regions detected in this image.</p>';
+  } else {
+    detections.forEach((det, i) => {
+      const item = document.createElement('div');
+      const cssClass = det.label === 'Good' ? 'good' : 'defect'; // red for all non-Good labels
+      const displayLabel = labelMap[det.label] || det.label;      // apply display mapping
+      item.className = `detection-item ${cssClass}`;
+      const [x1,y1,x2,y2] = det.bbox;
+      item.innerHTML = `
+        <span class="di-num">#${String(i+1).padStart(2,'0')}</span>
+        <span class="di-badge ${cssClass}">${displayLabel.toUpperCase()}</span>
+        <span class="di-conf">${(det.confidence * 100).toFixed(1)}%</span>
+        <span class="di-bbox">[${x1},${y1} → ${x2},${y2}]</span>
+      `;
+      item.style.animationDelay = `${i * 60}ms`;
+      detectionsList.appendChild(item);
+    });
+  }
+
+  previewBadge.textContent = 'Scanned';
+  previewBadge.style.color = 'var(--green)';
+
+  // Show result in right panel — preview stays visible in left panel
+  resultsCard.classList.remove('hidden');
+  resultsCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+  const msg = defect_count > 0
+    ? `⚠ ${defect_count} defect${defect_count > 1 ? 's' : ''} detected`
+    : '✓ No defects found';
+  toast(msg, defect_count > 0 ? 'error' : 'success');
+}
+
+function computeQuality(good, defect, total) {
+  if (total === 0) return { label: 'N/A', color: 'var(--text-muted)' };
+  const ratio = defect / total;
+  if (ratio === 0)      return { label: 'PASS', color: 'var(--green)' };
+  if (ratio <= 0.2)     return { label: 'WARN', color: 'var(--yellow)' };
+  return                       { label: 'FAIL', color: 'var(--red)' };
+}
+
+// ══════════════════════════════════════════════════════════════ NEW SCAN ═════
+btnNewScan.addEventListener('click', () => {
+  resultsCard.classList.add('hidden');
+  previewCard.classList.add('hidden');
+  currentFile    = null;
+  currentDataUrl = null;
+  fileInput.value = '';
+  previewBadge.textContent = 'Ready to scan';
+  previewBadge.style.color = '';
+  inputCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+});
+
+// ══════════════════════════════════════════════════════════════ TOAST ════════
+function toast(msg, type = 'info') {
+  const icons = { info: 'ℹ', success: '✓', error: '✕' };
+  const el    = document.createElement('div');
+  el.className = `toast toast-${type}`;
+  el.innerHTML = `<span class="toast-icon">${icons[type] ?? 'ℹ'}</span><span class="toast-msg">${msg}</span>`;
+  toastContainer.appendChild(el);
+  setTimeout(() => {
+    el.classList.add('hiding');
+    setTimeout(() => el.remove(), 320);
+  }, 3500);
+}
+
+// ══════════════════════════════════════════════════════════════ UTILS ═════════
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// ══════════════════════════════════════════════════════════════ INIT ══════════
+(async function init() {
+  await runLoader();
+  await checkHealth();
+  setInterval(checkHealth, HEALTH_INTERVAL);
+})();
+
+
+--- FILE: frontend\styles.css ---
+/* ═══════════════════════════════════════════════════════════════════════════
+   Chipset Defect Vision — Glassmorphic UI
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Reset & Base ─────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg-dark:    #050714;
+  --bg-card:    rgba(255,255,255,0.04);
+  --bg-card-hover: rgba(255,255,255,0.07);
+  --border:     rgba(255,255,255,0.08);
+  --border-glow:rgba(167,139,250,0.35);
+
+  --text-primary:   #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted:     #475569;
+
+  --purple:  #a78bfa;
+  --blue:    #38bdf8;
+  --green:   #22c55e;
+  --red:     #ef4444;
+  --yellow:  #eab308;
+
+  --grad-main: linear-gradient(135deg, #a78bfa 0%, #38bdf8 100%);
+  --grad-green:linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
+  --grad-red:  linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+
+  --shadow-sm:  0 2px 8px rgba(0,0,0,0.4);
+  --shadow-md:  0 8px 32px rgba(0,0,0,0.5);
+  --shadow-glow:0 0 32px rgba(167,139,250,0.15);
+
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --radius-xl: 28px;
+
+  --transition: 0.25s cubic-bezier(0.4,0,0.2,1);
+  --font-main:  'Inter', system-ui, sans-serif;
+  --font-mono:  'JetBrains Mono', monospace;
+}
+
+html { font-size: 16px; scroll-behavior: smooth; }
+
+body {
+  font-family: var(--font-main);
+  background: var(--bg-dark);
+  color: var(--text-primary);
+  min-height: 100vh;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+.hidden { display: none !important; }
+
+/* ── Utility ──────────────────────────────────────────────────────────────── */
+.glass {
+  background: var(--bg-card);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid var(--border);
+}
+
+/* ── Orbs (background blobs) ──────────────────────────────────────────────── */
+.orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(80px);
+  opacity: 0.35;
+  pointer-events: none;
+}
+.orb-1 { width: 600px; height: 600px; background: radial-gradient(#7c3aed, transparent 70%); top: -200px; left: -200px; animation: floatOrb 12s ease-in-out infinite; }
+.orb-2 { width: 500px; height: 500px; background: radial-gradient(#0ea5e9, transparent 70%); bottom: -150px; right: -150px; animation: floatOrb 16s ease-in-out infinite reverse; }
+.orb-3 { width: 300px; height: 300px; background: radial-gradient(#6d28d9, transparent 70%); top: 40%; left: 60%; animation: floatOrb 10s ease-in-out infinite 4s; }
+
+@keyframes floatOrb {
+  0%,100% { transform: translate(0,0) scale(1); }
+  33%      { transform: translate(30px,-20px) scale(1.05); }
+  66%      { transform: translate(-20px,15px) scale(0.97); }
+}
+
+/* ── Grid Overlay ─────────────────────────────────────────────────────────── */
+.grid-overlay {
+  position: fixed; inset: 0; pointer-events: none;
+  background-image:
+    linear-gradient(rgba(167,139,250,0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(167,139,250,0.03) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+
+/* ═══════════════════════════════════ LOADER ════════════════════════════════ */
+.loader-screen {
+  position: fixed; inset: 0; z-index: 1000;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg-dark);
+  transition: opacity 0.6s ease, transform 0.6s ease;
+}
+.loader-screen.fade-out { opacity: 0; transform: scale(1.03); pointer-events: none; }
+
+.loader-bg { position: absolute; inset: 0; overflow: hidden; }
+
+.loader-content {
+  position: relative; z-index: 1;
+  display: flex; flex-direction: column; align-items: center; gap: 16px;
+  text-align: center; padding: 40px;
+}
+
+.loader-icon {
+  width: 80px; height: 80px; margin-bottom: 8px;
+  animation: pulseFade 2s ease-in-out infinite;
+}
+
+.loader-spinner {
+  width: 60px; height: 60px; position: relative;
+}
+.spinner-ring {
+  position: absolute; inset: 0; border-radius: 50%;
+  border: 2px solid transparent;
+  border-top-color: var(--purple);
+  border-right-color: var(--blue);
+  animation: spin 1s linear infinite;
+}
+
+.loader-title {
+  font-size: 1.75rem; font-weight: 600; letter-spacing: -0.02em;
+  background: var(--grad-main); -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+}
+
+.loader-sub {
+  font-size: 0.85rem; color: var(--text-secondary);
+  font-family: var(--font-mono); letter-spacing: 0.05em;
+}
+
+.loader-bar {
+  width: 280px; height: 3px; border-radius: 99px;
+  background: rgba(255,255,255,0.08); overflow: hidden; margin-top: 8px;
+}
+.loader-bar-fill {
+  height: 100%; width: 0%;
+  background: var(--grad-main);
+  border-radius: 99px;
+  transition: width 0.4s ease;
+}
+
+.loader-status {
+  font-size: 0.78rem; color: var(--text-muted);
+  font-family: var(--font-mono); min-height: 1.2em;
+}
+
+/* Animated dots */
+.dots::after {
+  content: '';
+  animation: dotAnim 1.5s steps(4, end) infinite;
+}
+@keyframes dotAnim {
+  0%   { content: ''; }
+  25%  { content: '.'; }
+  50%  { content: '..'; }
+  75%  { content: '...'; }
+  100% { content: ''; }
+}
+
+/* ═══════════════════════════════════════ APP ═══════════════════════════════ */
+.app {
+  position: relative; min-height: 100vh;
+  display: flex; flex-direction: column;
+  opacity: 0; transition: opacity 0.5s ease;
+}
+.app.visible { opacity: 1; }
+
+.app-bg { position: fixed; inset: 0; overflow: hidden; pointer-events: none; }
+
+/* ── Header ──────────────────────────────────────────────────────────────── */
+.header {
+  position: sticky; top: 0; z-index: 100;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 32px;
+  background: rgba(5,7,20,0.7);
+  backdrop-filter: blur(20px);
+  border-bottom: 1px solid var(--border);
+}
+
+.header-brand { display: flex; align-items: center; gap: 12px; }
+.brand-icon { width: 36px; height: 36px; flex-shrink: 0; }
+.brand-name {
+  display: block; font-size: 1rem; font-weight: 600;
+  background: var(--grad-main); -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+}
+.brand-sub { display: block; font-size: 0.7rem; color: var(--text-muted); font-family: var(--font-mono); margin-top: 1px; }
+
+.header-status { display: flex; align-items: center; gap: 8px; font-size: 0.82rem; color: var(--text-secondary); }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); transition: background var(--transition); }
+.status-dot.online  { background: var(--green); box-shadow: 0 0 8px var(--green); animation: pulse 2s ease-in-out infinite; }
+.status-dot.offline { background: var(--red); }
+
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
+
+/* ── Main shell ───────────────────────────────────────────────────────────── */
+.main {
+  flex: 1; position: relative; z-index: 1;
+  display: flex; flex-direction: column; gap: 0;
+  width: 100%; padding: 24px 24px 0;
+}
+
+/* ── Horizontal split layout ─────────────────────────────────────────────── */
+.main-container {
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+  width: 100%;
+}
+
+/* Left panel — 30% fixed width, scrollable, sticky */
+.left-panel {
+  width: 30%;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  position: sticky;
+  top: 74px;
+  max-height: calc(100vh - 98px);
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+.left-panel::-webkit-scrollbar { display: none; }
+
+/* Right panel — 70% of remaining width */
+.right-panel {
+  width: 70%;
+  min-width: 0;
+}
+
+/* ── Cards ───────────────────────────────────────────────────────────────── */
+.card {
+  background: var(--bg-card);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  padding: 28px 28px;
+  box-shadow: var(--shadow-md), var(--shadow-glow);
+  animation: slideUp 0.4s ease both;
+}
+.card:hover { border-color: var(--border-glow); }
+
+@keyframes slideUp { from{opacity:0;transform:translateY(16px)} to{opacity:1;transform:translateY(0)} }
+
+.card-header {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  margin-bottom: 22px;
+}
+.card-header h2 { font-size: 1.15rem; font-weight: 600; color: var(--text-primary); }
+.card-header p  { font-size: 0.82rem; color: var(--text-secondary); margin-top: 3px; }
+
+/* ── Mode Toggle ─────────────────────────────────────────────────────────── */
+.mode-toggle {
+  display: flex; gap: 10px; margin-bottom: 20px;
+}
+.mode-btn {
+  flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 11px 20px; border-radius: var(--radius-md);
+  background: rgba(255,255,255,0.04); border: 1px solid var(--border);
+  color: var(--text-secondary); font-size: 0.88rem; font-weight: 500;
+  cursor: pointer; transition: all var(--transition);
+}
+.mode-btn svg { width: 16px; height: 16px; flex-shrink: 0; }
+.mode-btn:hover { background: rgba(255,255,255,0.07); color: var(--text-primary); }
+.mode-btn.active {
+  background: rgba(167,139,250,0.12); border-color: rgba(167,139,250,0.4);
+  color: var(--purple);
+  box-shadow: 0 0 16px rgba(167,139,250,0.1);
+}
+
+/* ── Drop Zone ───────────────────────────────────────────────────────────── */
+.drop-zone {
+  position: relative;
+  border: 1.5px dashed var(--border);
+  border-radius: var(--radius-lg);
+  padding: 48px 24px; text-align: center;
+  cursor: pointer; transition: all var(--transition);
+  background: rgba(255,255,255,0.02);
+}
+.drop-zone:hover, .drop-zone.dragging {
+  border-color: var(--purple); background: rgba(167,139,250,0.05);
+  box-shadow: 0 0 24px rgba(167,139,250,0.08);
+}
+.drop-zone.dragging { transform: scale(1.01); }
+
+.drop-icon { width: 56px; height: 56px; margin: 0 auto 14px; opacity: 0.7; }
+.drop-text  { font-size: 0.95rem; font-weight: 500; color: var(--text-primary); }
+.drop-sub   { font-size: 0.82rem; color: var(--text-secondary); margin-top: 4px; }
+.drop-hint  { font-size: 0.72rem; color: var(--text-muted); margin-top: 10px; font-family: var(--font-mono); }
+.file-input { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%; }
+
+/* ── Camera ──────────────────────────────────────────────────────────────── */
+.camera-viewport {
+  position: relative; border-radius: var(--radius-lg); overflow: hidden;
+  background: rgba(0,0,0,0.5); aspect-ratio: 16/9; margin-bottom: 14px;
+  border: 1px solid var(--border);
+}
+#cameraFeed {
+  width: 100%; height: 100%; object-fit: cover; display: block;
+}
+.camera-overlay {
+  position: absolute; inset: 0; pointer-events: none;
+}
+.scan-line {
+  position: absolute; left: 0; right: 0; height: 2px;
+  background: linear-gradient(90deg, transparent, var(--purple), var(--blue), transparent);
+  top: 0; animation: scanDown 3s linear infinite; opacity: 0;
+}
+.camera-viewport.active .scan-line { opacity: 1; }
+
+@keyframes scanDown {
+  0%   { top: 0%; }
+  100% { top: 100%; }
+}
+
+/* Corner brackets */
+.corner {
+  position: absolute; width: 20px; height: 20px;
+  border-color: var(--purple); border-style: solid;
+}
+.corner.tl { top: 12px; left: 12px;  border-width: 2px 0 0 2px; }
+.corner.tr { top: 12px; right: 12px; border-width: 2px 2px 0 0; }
+.corner.bl { bottom: 12px; left: 12px;  border-width: 0 0 2px 2px; }
+.corner.br { bottom: 12px; right: 12px; border-width: 0 2px 2px 0; }
+
+.camera-placeholder {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+  color: var(--text-muted);
+}
+.camera-placeholder svg { width: 64px; height: 64px; opacity: 0.5; }
+.camera-placeholder p { font-size: 0.82rem; font-family: var(--font-mono); }
+
+.camera-controls { display: flex; gap: 10px; }
+
+/* ── Buttons ──────────────────────────────────────────────────────────────── */
+.btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 11px 22px; border-radius: var(--radius-md);
+  font-size: 0.88rem; font-weight: 500; cursor: pointer;
+  border: none; transition: all var(--transition); white-space: nowrap;
+}
+.btn svg { width: 16px; height: 16px; flex-shrink: 0; }
+
+.btn-primary {
+  background: var(--grad-main); color: #fff;
+  box-shadow: 0 4px 16px rgba(167,139,250,0.3);
+}
+.btn-primary:hover { transform: translateY(-1px); box-shadow: 0 6px 24px rgba(167,139,250,0.4); }
+.btn-primary:active { transform: translateY(0); }
+
+.btn-secondary {
+  background: rgba(255,255,255,0.06); color: var(--text-primary);
+  border: 1px solid var(--border);
+}
+.btn-secondary:hover { background: rgba(255,255,255,0.10); border-color: var(--border-glow); }
+
+.btn-accent {
+  background: rgba(167,139,250,0.15); color: var(--purple);
+  border: 1px solid rgba(167,139,250,0.3);
+}
+.btn-accent:hover { background: rgba(167,139,250,0.25); }
+
+.btn-danger {
+  background: rgba(239,68,68,0.12); color: var(--red);
+  border: 1px solid rgba(239,68,68,0.3);
+}
+.btn-danger:hover { background: rgba(239,68,68,0.22); }
+
+.btn-ghost {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 12px; border-radius: var(--radius-sm);
+  font-size: 0.8rem; color: var(--text-secondary); cursor: pointer;
+  background: transparent; border: 1px solid var(--border);
+  transition: all var(--transition);
+}
+.btn-ghost svg { width: 14px; height: 14px; }
+.btn-ghost:hover { color: var(--text-primary); border-color: var(--border-glow); background: rgba(255,255,255,0.04); }
+
+.btn-scan {
+  width: 100%; justify-content: center; margin-top: 18px;
+  padding: 14px 22px; font-size: 0.95rem;
+}
+
+/* ── Preview ──────────────────────────────────────────────────────────────── */
+.preview-wrap {
+  position: relative; border-radius: var(--radius-lg); overflow: hidden;
+  background: rgba(0,0,0,0.4); border: 1px solid var(--border);
+}
+/* Thumbnail preview — always visible in left panel */
+#previewImg {
+  width: 100%; max-height: 160px; object-fit: contain; display: block;
+  border-radius: var(--radius-md);
+}
+.preview-badge {
+  position: absolute; bottom: 12px; right: 12px;
+  padding: 5px 12px; border-radius: 99px;
+  background: rgba(167,139,250,0.15); border: 1px solid rgba(167,139,250,0.3);
+  color: var(--purple); font-size: 0.75rem; font-family: var(--font-mono);
+  backdrop-filter: blur(8px);
+}
+
+/* ── Processing Overlay — disabled: scan runs silently, no full-screen modal ─ */
+.processing-overlay {
+  display: none !important;
+}
+.processing-card {
+  background: rgba(255,255,255,0.05);
+  border: 1px solid var(--border-glow);
+  border-radius: var(--radius-xl); padding: 48px 56px;
+  text-align: center; display: flex; flex-direction: column; align-items: center; gap: 16px;
+  box-shadow: var(--shadow-md), 0 0 60px rgba(167,139,250,0.12);
+  backdrop-filter: blur(24px);
+}
+.processing-card h3 { font-size: 1.2rem; font-weight: 600; }
+.processing-card p  { font-size: 0.82rem; color: var(--text-secondary); font-family: var(--font-mono); }
+
+.processing-rings {
+  position: relative; width: 80px; height: 80px; margin-bottom: 8px;
+}
+.ring {
+  position: absolute; border-radius: 50%; border: 1.5px solid transparent;
+}
+.ring-1 { inset: 0; border-top-color: var(--purple); animation: spin 1.2s linear infinite; }
+.ring-2 { inset: 10px; border-top-color: var(--blue); animation: spin 0.9s linear infinite reverse; }
+.ring-3 { inset: 20px; border-top-color: rgba(167,139,250,0.4); animation: spin 1.5s linear infinite; }
+.ring-center {
+  position: absolute; inset: 28px;
+  display: flex; align-items: center; justify-content: center;
+}
+.ring-center svg { width: 24px; height: 24px; }
+
+.progress-steps {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: center;
+}
+.step {
+  padding: 5px 14px; border-radius: 99px; font-size: 0.75rem; font-family: var(--font-mono);
+  background: rgba(255,255,255,0.04); border: 1px solid var(--border); color: var(--text-muted);
+  transition: all var(--transition);
+}
+.step.active {
+  background: rgba(167,139,250,0.15); border-color: rgba(167,139,250,0.4);
+  color: var(--purple);
+}
+.step.done {
+  background: rgba(34,197,94,0.12); border-color: rgba(34,197,94,0.3);
+  color: var(--green);
+}
+.step-arrow { color: var(--text-muted); font-size: 0.75rem; }
+
+/* ── Results ──────────────────────────────────────────────────────────────── */
+.stats-row {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 22px;
+}
+@media (max-width: 640px) { .stats-row { grid-template-columns: repeat(2,1fr); } }
+
+.stat-card {
+  border-radius: var(--radius-md); padding: 18px 16px; text-align: center;
+  border: 1px solid var(--border); background: rgba(255,255,255,0.03);
+  transition: all var(--transition);
+}
+.stat-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-sm); }
+
+.stat-icon { font-size: 1.2rem; margin-bottom: 8px; opacity: 0.7; }
+.stat-value { font-size: 1.8rem; font-weight: 700; line-height: 1; margin-bottom: 4px; }
+.stat-label { font-size: 0.72rem; color: var(--text-muted); font-family: var(--font-mono); }
+
+.stat-total  .stat-value { background: var(--grad-main); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.stat-good   .stat-value { color: var(--green); }
+.stat-defect .stat-value { color: var(--red); }
+.stat-quality .stat-value { font-size: 1.1rem; font-weight: 600; }
+
+/* Result image wrap — full width, content centred inside */
+.results-image-wrap {
+  position: relative; border-radius: var(--radius-lg); overflow: hidden;
+  border: 1px solid var(--border); background: rgba(0,0,0,0.5);
+  margin-bottom: 22px;
+  display: flex; align-items: center; justify-content: center;
+  min-height: 300px;
+}
+/* Result image — large, centred, fills right panel */
+#resultImg {
+  width: 100%; max-height: 80vh;
+  object-fit: contain; display: block;
+}
+
+.results-legend {
+  position: absolute; bottom: 12px; left: 12px;
+  display: flex; gap: 12px;
+}
+.legend-item {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 12px; border-radius: 99px;
+  font-size: 0.74rem; font-family: var(--font-mono); font-weight: 500;
+  backdrop-filter: blur(8px);
+}
+.legend-good   { background: rgba(34,197,94,0.15); border: 1px solid rgba(34,197,94,0.3); color: var(--green); }
+.legend-defect { background: rgba(239,68,68,0.15); border: 1px solid rgba(239,68,68,0.3); color: var(--red); }
+.legend-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+
+/* Detection List */
+.detections-title {
+  font-size: 0.9rem; font-weight: 600; color: var(--text-secondary);
+  margin-bottom: 12px; font-family: var(--font-mono); letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.detections-list { display: flex; flex-direction: column; gap: 8px; max-height: 240px; overflow-y: auto; }
+.detections-list::-webkit-scrollbar { width: 4px; }
+.detections-list::-webkit-scrollbar-track { background: transparent; }
+.detections-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
+
+.no-detections { font-size: 0.82rem; color: var(--text-muted); font-style: italic; text-align: center; padding: 20px; }
+
+.detection-item {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 14px; border-radius: var(--radius-sm);
+  background: rgba(255,255,255,0.03); border: 1px solid var(--border);
+  font-size: 0.82rem; animation: slideUp 0.3s ease both;
+}
+.detection-item.defect { border-color: rgba(239,68,68,0.2); background: rgba(239,68,68,0.05); }
+.detection-item.good   { border-color: rgba(34,197,94,0.2); background: rgba(34,197,94,0.05); }
+
+.di-badge {
+  padding: 3px 10px; border-radius: 99px; font-size: 0.72rem; font-weight: 600;
+  font-family: var(--font-mono); flex-shrink: 0;
+}
+.di-badge.defect { background: rgba(239,68,68,0.2); color: var(--red); border: 1px solid rgba(239,68,68,0.3); }
+.di-badge.good   { background: rgba(34,197,94,0.15); color: var(--green); border: 1px solid rgba(34,197,94,0.3); }
+
+.di-conf { color: var(--text-secondary); font-family: var(--font-mono); }
+.di-bbox { color: var(--text-muted); font-family: var(--font-mono); font-size: 0.72rem; margin-left: auto; }
+.di-num  { color: var(--text-muted); font-size: 0.78rem; }
+
+/* ── Footer ──────────────────────────────────────────────────────────────── */
+.footer {
+  position: relative; z-index: 1;
+  text-align: center; padding: 16px 24px;
+  font-size: 0.75rem; color: var(--text-muted); font-family: var(--font-mono);
+  border-top: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+}
+.footer-sep { opacity: 0.4; }
+
+/* ── Toast ───────────────────────────────────────────────────────────────── */
+.toast-container {
+  position: fixed; bottom: 24px; right: 24px;
+  display: flex; flex-direction: column; gap: 10px; z-index: 500;
+}
+.toast {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 18px; border-radius: var(--radius-md); min-width: 260px;
+  background: rgba(15,17,35,0.95);
+  backdrop-filter: blur(20px);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-md);
+  font-size: 0.85rem; color: var(--text-primary);
+  animation: toastIn 0.3s cubic-bezier(0.34,1.56,0.64,1);
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+.toast.toast-error  { border-color: rgba(239,68,68,0.4); }
+.toast.toast-success{ border-color: rgba(34,197,94,0.4); }
+.toast.toast-info   { border-color: rgba(56,189,248,0.4); }
+.toast.hiding { opacity: 0; transform: translateX(16px); }
+
+.toast-icon { font-size: 1rem; flex-shrink: 0; }
+.toast-msg  { flex: 1; }
+
+@keyframes toastIn { from{opacity:0;transform:translateX(20px)} to{opacity:1;transform:translateX(0)} }
+
+/* ── Animations ──────────────────────────────────────────────────────────── */
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes pulseFade { 0%,100%{opacity:0.8;transform:scale(1)} 50%{opacity:1;transform:scale(1.05)} }
+
+/* Left panel compact overrides (narrow 30% column) */
+.left-panel .drop-zone      { padding: 24px 12px; }
+.left-panel .drop-icon      { width: 32px; height: 32px; }
+.left-panel .drop-text      { font-size: 0.82rem; }
+.left-panel .drop-sub       { font-size: 0.72rem; }
+.left-panel .drop-hint      { display: none; }
+.left-panel .mode-btn       { font-size: 0.75rem; padding: 8px 8px; gap: 5px; }
+.left-panel .mode-btn svg   { width: 13px; height: 13px; }
+.left-panel .card           { padding: 16px 14px; }
+.left-panel .card-header    { margin-bottom: 12px; }
+.left-panel .card-header h2 { font-size: 0.9rem; }
+.left-panel .card-header p  { font-size: 0.7rem; }
+.left-panel .btn-scan       { margin-top: 12px; padding: 10px 14px; font-size: 0.82rem; }
+.left-panel .preview-badge  { font-size: 0.68rem; padding: 3px 8px; }
+.left-panel .btn-scan svg   { width: 14px; height: 14px; }
+
+/* ── Responsive ──────────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .header { padding: 12px 16px; }
+  .main   { padding: 20px 16px; }
+  .card   { padding: 20px 18px; }
+  .brand-sub { display: none; }
+  .processing-card { padding: 36px 28px; }
+
+  /* Stack panels vertically on mobile */
+  .main-container { flex-direction: column; }
+  .left-panel     { width: 100%; position: static; max-height: none; }
+  .right-panel    { width: 100%; }
+}
+
+
+--- IMAGE: incoming_data\20260320T074609821904Z.jpg ---
+
+--- IMAGE: incoming_data\20260320T074636056915Z.jpg ---
+
+--- IMAGE: incoming_data\20260320T075239364335Z.jpg ---
+
+--- IMAGE: incoming_data\20260320T082050910629Z.jpg ---
+
+--- IMAGE: incoming_data\20260320T082156593076Z.jpg ---
+
+--- IMAGE: incoming_data\20260320T083138284794Z.jpg ---
+
+--- IMAGE: incoming_data\20260320T114204148757Z.jpg ---
+
+--- IMAGE: incoming_data\20260320T114259559470Z.jpg ---
+
+--- IMAGE: incoming_data\20260320T114320968062Z.jpg ---
+
+--- IMAGE: incoming_data\20260320T114328237338Z.jpg ---
+
+--- IMAGE: incoming_data\20260320T114349779251Z.jpg ---
+
+--- IMAGE: incoming_data\20260320T114449242463Z.jpg ---
+
+--- IMAGE: incoming_data\20260320T114521321194Z.jpg ---
+
+--- IMAGE: incoming_data\20260320T125404339142Z.jpg ---
+
+--- IMAGE: incoming_data\20260320T125459954641Z.jpg ---
+
+--- IMAGE: incoming_data\20260320T125529767250Z.jpg ---
+
+--- IMAGE: incoming_data\20260320T125603145828Z.jpg ---
+
+--- IMAGE: incoming_data\20260320T125629365288Z.jpg ---
+
+--- IMAGE: incoming_data\20260320T125705935211Z.jpg ---
+
+--- IMAGE: incoming_data\20260320T125733785381Z.jpg ---
+
+--- IMAGE: incoming_data\20260320T165938325524Z.jpg ---
+
+--- IMAGE: incoming_data\20260320T170122236266Z.jpg ---
+
+--- IMAGE: incoming_data\20260321T102503433922Z.jpg ---
+
+--- IMAGE: incoming_data\20260321T102711445742Z.jpg ---
+
+--- IMAGE: incoming_data\20260321T102730278176Z.jpg ---
+
+--- IMAGE: incoming_data\20260321T102740089111Z.jpg ---
+
+--- IMAGE: incoming_data\20260321T103001266178Z.jpg ---
+
+--- IMAGE: incoming_data\20260321T103055621836Z.jpg ---
+
+--- IMAGE: incoming_data\20260321T103138193191Z.jpg ---
+
+--- IMAGE: incoming_data\20260321T103146162964Z.jpg ---
+
+--- IMAGE: incoming_data\20260321T103322411523Z.jpg ---
+
+--- IMAGE: incoming_data\20260321T104432869289Z.jpg ---
+
+--- IMAGE: incoming_data\20260321T110241852684Z.jpg ---
+
+--- IMAGE: incoming_data\20260321T111046854079Z.jpg ---
+
+--- IMAGE: incoming_data\20260321T111800398287Z.jpg ---
+
+--- IMAGE: incoming_data\20260321T112041910356Z.jpg ---
+
+--- IMAGE: incoming_data\20260321T112317382954Z.jpg ---
+
+--- IMAGE: incoming_data\20260321T112342226823Z.jpg ---
+
+--- IMAGE: incoming_data\20260321T112428314832Z.jpg ---
+
+--- IMAGE: incoming_data\20260321T113219453493Z.jpg ---
+
+--- IMAGE: incoming_data\20260321T113249367937Z.jpg ---
+
+--- IMAGE: incoming_data\20260321T113253904637Z.jpg ---
+
+--- IMAGE: incoming_data\20260321T113254211297Z.jpg ---
+
+--- IMAGE: incoming_data\20260321T113408722186Z.jpg ---
+
+--- IMAGE: incoming_data\20260321T113451384252Z.jpg ---
+
+--- IMAGE: incoming_data\20260321T113521431298Z.jpg ---
+
+--- IMAGE: incoming_data\20260321T113534447497Z.jpg ---
+
+--- IMAGE: incoming_data\20260321T113555759185Z.jpg ---
+
+--- IMAGE: incoming_data\20260326T170847526656Z.jpg ---
+
+--- IMAGE: incoming_data\20260326T170858634536Z.jpg ---
+
+--- IMAGE: incoming_data\20260326T170919036356Z.jpg ---
+
+--- IMAGE: incoming_data\20260326T171003284497Z.jpg ---
+
+--- IMAGE: incoming_data\20260326T171514908870Z.jpg ---
+
+--- IMAGE: incoming_data\20260326T171523938205Z.jpg ---
+
+--- IMAGE: incoming_data\20260326T172552685367Z.jpg ---
+
+--- IMAGE: incoming_data\20260326T173512433380Z.jpg ---
+
+--- IMAGE: incoming_data\20260326T173800864506Z.jpg ---
+
+--- IMAGE: incoming_data\20260326T174032783013Z.jpg ---
+
+--- IMAGE: incoming_data\20260327T082414505596Z.jpg ---
+
+--- IMAGE: incoming_data\20260327T082512258811Z.jpg ---
+
+--- IMAGE: incoming_data\20260327T082520429753Z.jpg ---
+
+--- IMAGE: incoming_data\20260327T082538451296Z.jpg ---
+
+--- FILE (Not Dumped): raw_data\images\.gitkeep ---
+
+--- FILE (Not Dumped): raw_data\labels\.gitkeep ---
+
+--- IMAGE: raw_data\Missing_hole\01_missing_hole_01.jpg ---
+
+--- IMAGE: raw_data\Missing_hole\01_missing_hole_02.jpg ---
+
+--- IMAGE: raw_data\Missing_hole\01_missing_hole_03.jpg ---
+
+--- IMAGE: raw_data\Missing_hole\01_missing_hole_04.jpg ---
+
+--- IMAGE: raw_data\Missing_hole\01_missing_hole_05.jpg ---
+
+--- IMAGE: raw_data\Missing_hole\01_missing_hole_06.jpg ---
+
+--- IMAGE: raw_data\Missing_hole\01_missing_hole_07.jpg ---
+
+--- IMAGE: raw_data\Missing_hole\01_missing_hole_08.jpg ---
+
+--- IMAGE: raw_data\Missing_hole\01_missing_hole_09.jpg ---
+
+--- IMAGE: raw_data\Missing_hole\01_missing_hole_10.jpg ---
+
+--- IMAGE: raw_data\Mouse_bite\01_mouse_bite_01.jpg ---
+
+--- IMAGE: raw_data\Mouse_bite\01_mouse_bite_02.jpg ---
+
+--- IMAGE: raw_data\Mouse_bite\01_mouse_bite_03.jpg ---
+
+--- IMAGE: raw_data\Mouse_bite\01_mouse_bite_04.jpg ---
+
+--- IMAGE: raw_data\Mouse_bite\01_mouse_bite_05.jpg ---
+
+--- IMAGE: raw_data\Mouse_bite\01_mouse_bite_06.jpg ---
+
+--- IMAGE: raw_data\Mouse_bite\01_mouse_bite_07.jpg ---
+
+--- IMAGE: raw_data\Mouse_bite\01_mouse_bite_08.jpg ---
+
+--- IMAGE: raw_data\Mouse_bite\01_mouse_bite_09.jpg ---
+
+--- IMAGE: raw_data\Mouse_bite\01_mouse_bite_10.jpg ---
+
+--- IMAGE: raw_data\Open_circuit\01_open_circuit_01.jpg ---
+
+--- IMAGE: raw_data\Open_circuit\01_open_circuit_02.jpg ---
+
+--- IMAGE: raw_data\Open_circuit\01_open_circuit_03.jpg ---
+
+--- IMAGE: raw_data\Open_circuit\01_open_circuit_04.jpg ---
+
+--- IMAGE: raw_data\Open_circuit\01_open_circuit_05.jpg ---
+
+--- IMAGE: raw_data\Open_circuit\01_open_circuit_06.jpg ---
+
+--- IMAGE: raw_data\Open_circuit\01_open_circuit_07.jpg ---
+
+--- IMAGE: raw_data\Open_circuit\01_open_circuit_08.jpg ---
+
+--- IMAGE: raw_data\Open_circuit\01_open_circuit_09.jpg ---
+
+--- IMAGE: raw_data\Open_circuit\01_open_circuit_10.jpg ---
+
+--- FILE (Not Dumped): raw_data\regions\.gitkeep ---
+
+--- IMAGE: raw_data\Short\01_short_01.jpg ---
+
+--- IMAGE: raw_data\Short\01_short_02.jpg ---
+
+--- IMAGE: raw_data\Short\01_short_03.jpg ---
+
+--- IMAGE: raw_data\Short\01_short_04.jpg ---
+
+--- IMAGE: raw_data\Short\01_short_05.jpg ---
+
+--- IMAGE: raw_data\Short\01_short_06.jpg ---
+
+--- IMAGE: raw_data\Short\01_short_07.jpg ---
+
+--- IMAGE: raw_data\Short\01_short_08.jpg ---
+
+--- IMAGE: raw_data\Short\01_short_09.jpg ---
+
+--- IMAGE: raw_data\Short\01_short_10.jpg ---
+
+--- IMAGE: raw_data\Solder Defect\Screenshot 2026-03-20 160137.png ---
+
+--- IMAGE: raw_data\Solder Defect\Screenshot 2026-03-20 160145.png ---
+
+--- IMAGE: raw_data\Solder Defect\Screenshot 2026-03-20 160151.png ---
+
+--- IMAGE: raw_data\Solder Defect\Screenshot 2026-03-20 160158 - Copy (2).png ---
+
+--- IMAGE: raw_data\Solder Defect\Screenshot 2026-03-20 160158 - Copy (3).png ---
+
+--- IMAGE: raw_data\Solder Defect\Screenshot 2026-03-20 160158 - Copy (4).png ---
+
+--- IMAGE: raw_data\Solder Defect\Screenshot 2026-03-20 160158 - Copy (5).png ---
+
+--- IMAGE: raw_data\Solder Defect\Screenshot 2026-03-20 160158 - Copy (6).png ---
+
+--- IMAGE: raw_data\Solder Defect\Screenshot 2026-03-20 160158 - Copy (7).png ---
+
+--- IMAGE: raw_data\Solder Defect\Screenshot 2026-03-20 160158 - Copy (8).png ---
+
+--- IMAGE: raw_data\Spur\01_spur_01.jpg ---
+
+--- IMAGE: raw_data\Spur\01_spur_02.jpg ---
+
+--- IMAGE: raw_data\Spur\01_spur_03.jpg ---
+
+--- IMAGE: raw_data\Spur\01_spur_04.jpg ---
+
+--- IMAGE: raw_data\Spur\01_spur_05.jpg ---
+
+--- IMAGE: raw_data\Spur\01_spur_06.jpg ---
+
+--- IMAGE: raw_data\Spur\01_spur_07.jpg ---
+
+--- IMAGE: raw_data\Spur\01_spur_08.jpg ---
+
+--- IMAGE: raw_data\Spur\01_spur_09.jpg ---
+
+--- IMAGE: raw_data\Spur\01_spur_10.jpg ---
+
+--- IMAGE: raw_data\Spurious_copper\01_spurious_copper_01.jpg ---
+
+--- IMAGE: raw_data\Spurious_copper\01_spurious_copper_02.jpg ---
+
+--- IMAGE: raw_data\Spurious_copper\01_spurious_copper_03.jpg ---
+
+--- IMAGE: raw_data\Spurious_copper\01_spurious_copper_04.jpg ---
+
+--- IMAGE: raw_data\Spurious_copper\01_spurious_copper_05.jpg ---
+
+--- IMAGE: raw_data\Spurious_copper\01_spurious_copper_06.jpg ---
+
+--- IMAGE: raw_data\Spurious_copper\01_spurious_copper_07.jpg ---
+
+--- IMAGE: raw_data\Spurious_copper\01_spurious_copper_08.jpg ---
+
+--- IMAGE: raw_data\Spurious_copper\01_spurious_copper_09.jpg ---
+
+--- IMAGE: raw_data\Spurious_copper\01_spurious_copper_10.jpg ---
+
+--- IMAGE: scans\20260327T083836292433Z\input.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T083836292433Z\logs.txt ---
+
+--- FILE (Not Dumped): scans\20260327T083836292433Z\meta.txt ---
+
+--- IMAGE: scans\20260327T083836292433Z\output.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T083836292433Z\result.json ---
+
+--- IMAGE: scans\20260327T083942152231Z\input.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T083942152231Z\logs.txt ---
+
+--- FILE (Not Dumped): scans\20260327T083942152231Z\meta.txt ---
+
+--- IMAGE: scans\20260327T083942152231Z\output.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T083942152231Z\result.json ---
+
+--- IMAGE: scans\20260327T084101665817Z\input.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T084101665817Z\logs.txt ---
+
+--- FILE (Not Dumped): scans\20260327T084101665817Z\meta.txt ---
+
+--- IMAGE: scans\20260327T084101665817Z\output.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T084101665817Z\result.json ---
+
+--- IMAGE: scans\20260327T084128355641Z\input.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T084128355641Z\logs.txt ---
+
+--- FILE (Not Dumped): scans\20260327T084128355641Z\meta.txt ---
+
+--- IMAGE: scans\20260327T084128355641Z\output.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T084128355641Z\result.json ---
+
+--- IMAGE: scans\20260327T090722385249Z\input.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T090722385249Z\logs.txt ---
+
+--- FILE (Not Dumped): scans\20260327T090722385249Z\meta.txt ---
+
+--- IMAGE: scans\20260327T090722385249Z\output.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T090722385249Z\result.json ---
+
+--- IMAGE: scans\20260327T090729385926Z\input.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T090729385926Z\logs.txt ---
+
+--- FILE (Not Dumped): scans\20260327T090729385926Z\meta.txt ---
+
+--- IMAGE: scans\20260327T090729385926Z\output.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T090729385926Z\result.json ---
+
+--- IMAGE: scans\20260327T104026346423Z\input.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T104026346423Z\logs.txt ---
+
+--- FILE (Not Dumped): scans\20260327T104026346423Z\meta.txt ---
+
+--- IMAGE: scans\20260327T104026346423Z\output.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T104026346423Z\result.json ---
+
+--- IMAGE: scans\20260327T104041294265Z\input.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T104041294265Z\logs.txt ---
+
+--- FILE (Not Dumped): scans\20260327T104041294265Z\meta.txt ---
+
+--- IMAGE: scans\20260327T104041294265Z\output.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T104041294265Z\result.json ---
+
+--- IMAGE: scans\20260327T104107169783Z\input.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T104107169783Z\logs.txt ---
+
+--- FILE (Not Dumped): scans\20260327T104107169783Z\meta.txt ---
+
+--- IMAGE: scans\20260327T104107169783Z\output.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T104107169783Z\result.json ---
+
+--- IMAGE: scans\20260327T104107464731Z\input.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T104107464731Z\logs.txt ---
+
+--- FILE (Not Dumped): scans\20260327T104107464731Z\meta.txt ---
+
+--- IMAGE: scans\20260327T104107464731Z\output.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T104107464731Z\result.json ---
+
+--- IMAGE: scans\20260327T104119583414Z\input.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T104119583414Z\logs.txt ---
+
+--- FILE (Not Dumped): scans\20260327T104119583414Z\meta.txt ---
+
+--- IMAGE: scans\20260327T104119583414Z\output.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T104119583414Z\result.json ---
+
+--- IMAGE: scans\20260327T104311773197Z\input.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T104311773197Z\logs.txt ---
+
+--- FILE (Not Dumped): scans\20260327T104311773197Z\meta.txt ---
+
+--- IMAGE: scans\20260327T104311773197Z\output.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T104311773197Z\result.json ---
+
+--- IMAGE: scans\20260327T104651819202Z\input.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T104651819202Z\logs.txt ---
+
+--- FILE (Not Dumped): scans\20260327T104651819202Z\meta.txt ---
+
+--- IMAGE: scans\20260327T104651819202Z\output.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T104651819202Z\result.json ---
+
+--- IMAGE: scans\20260327T104714257402Z\input.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T104714257402Z\logs.txt ---
+
+--- FILE (Not Dumped): scans\20260327T104714257402Z\meta.txt ---
+
+--- IMAGE: scans\20260327T104714257402Z\output.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T104714257402Z\result.json ---
+
+--- IMAGE: scans\20260327T104741260097Z\input.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T104741260097Z\logs.txt ---
+
+--- FILE (Not Dumped): scans\20260327T104741260097Z\meta.txt ---
+
+--- IMAGE: scans\20260327T104741260097Z\output.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T104741260097Z\result.json ---
+
+--- IMAGE: scans\20260327T104747261772Z\input.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T104747261772Z\logs.txt ---
+
+--- FILE (Not Dumped): scans\20260327T104747261772Z\meta.txt ---
+
+--- IMAGE: scans\20260327T104747261772Z\output.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T104747261772Z\result.json ---
+
+--- IMAGE: scans\20260327T110606080118Z\input.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T110606080118Z\logs.txt ---
+
+--- FILE (Not Dumped): scans\20260327T110606080118Z\meta.txt ---
+
+--- IMAGE: scans\20260327T110606080118Z\output.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T110606080118Z\result.json ---
+
+--- IMAGE: scans\20260327T110645491178Z\input.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T110645491178Z\logs.txt ---
+
+--- FILE (Not Dumped): scans\20260327T110645491178Z\meta.txt ---
+
+--- IMAGE: scans\20260327T110645491178Z\output.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T110645491178Z\result.json ---
+
+--- IMAGE: scans\20260327T110847553074Z\input.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T110847553074Z\logs.txt ---
+
+--- FILE (Not Dumped): scans\20260327T110847553074Z\meta.txt ---
+
+--- IMAGE: scans\20260327T110847553074Z\output.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T110847553074Z\result.json ---
+
+--- IMAGE: scans\20260327T110911810701Z\input.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T110911810701Z\logs.txt ---
+
+--- FILE (Not Dumped): scans\20260327T110911810701Z\meta.txt ---
+
+--- IMAGE: scans\20260327T110911810701Z\output.jpg ---
+
+--- FILE (Not Dumped): scans\20260327T110911810701Z\result.json ---
+
+--- FILE: scripts\export_repo_to_docx.py ---
+from __future__ import annotations
+
+from collections import Counter
+from pathlib import Path
+from typing import Iterable
+
+from docx import Document
+from docx.enum.section import WD_ORIENT
+from docx.enum.text import WD_BREAK
+from docx.oxml.ns import qn
+from docx.shared import Inches, Pt
+
+
+ROOT = Path(__file__).resolve().parents[1]
+OUTPUT_PATH = ROOT / "Chipset-Defect-Vision_full_workspace_export.docx"
+SKIP_DIRS = {".git"}
+CODE_DIR_HINTS = {
+    "app",
+    "frontend",
+    "scripts",
+    "training",
+}
+CODE_FILE_NAMES = {
+    "dockerfile",
+    "makefile",
+    "readme.md",
+    "requirements.txt",
+    ".gitignore",
+    ".dockerignore",
+    "data.yaml",
+    "classes.txt",
+}
+CODE_EXTENSIONS = {
+    ".bat",
+    ".c",
+    ".cc",
+    ".cfg",
+    ".conf",
+    ".css",
+    ".csv",
+    ".env",
+    ".go",
+    ".graphql",
+    ".h",
+    ".hpp",
+    ".html",
+    ".ini",
+    ".java",
+    ".js",
+    ".json",
+    ".jsx",
+    ".md",
+    ".mjs",
+    ".properties",
+    ".ps1",
+    ".py",
+    ".rb",
+    ".scss",
+    ".sh",
+    ".sql",
+    ".svg",
+    ".toml",
+    ".ts",
+    ".tsx",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
+NON_CODE_EXTENSIONS = {
+    ".cache",
+    ".doc",
+    ".docx",
+    ".gif",
+    ".jpeg",
+    ".jpg",
+    ".pdf",
+    ".pickle",
+    ".png",
+    ".pth",
+    ".pt",
+    ".pyc",
+    ".webp",
+    ".zip",
+}
+NON_CODE_PATH_PARTS = {
+    "__pycache__",
+    "data/labels",
+    "data/images",
+    "incoming_data",
+    "raw_data",
+    "runs",
+    "training/data",
+    "weights",
+}
+MAX_TEXT_FILE_SIZE = 512 * 1024
+
+
+def relative_posix(path: Path) -> str:
+    return path.relative_to(ROOT).as_posix()
+
+
+def iter_dirs_and_files() -> tuple[list[Path], list[Path]]:
+    dirs: list[Path] = []
+    files: list[Path] = []
+    for current_root, dir_names, file_names in os_walk_sorted(ROOT):
+        current_path = Path(current_root)
+        dirs.append(current_path)
+        for file_name in file_names:
+            files.append(current_path / file_name)
+    return dirs, files
+
+
+def os_walk_sorted(root: Path) -> Iterable[tuple[str, list[str], list[str]]]:
+    import os
+
+    for current_root, dir_names, file_names in os.walk(root):
+        dir_names[:] = sorted(name for name in dir_names if name not in SKIP_DIRS)
+        file_names.sort()
+        yield current_root, dir_names, file_names
+
+
+def looks_like_code_file(path: Path) -> bool:
+    rel = relative_posix(path)
+    lower_rel = rel.lower()
+    if path.name.lower() == OUTPUT_PATH.name.lower():
+        return False
+    if path.suffix.lower() in NON_CODE_EXTENSIONS:
+        return False
+    if any(part in lower_rel for part in NON_CODE_PATH_PARTS):
+        return False
+    if path.name.lower() in CODE_FILE_NAMES:
+        return is_text_file(path)
+    if path.suffix.lower() in CODE_EXTENSIONS:
+        return is_text_file(path)
+    if any(part in CODE_DIR_HINTS for part in path.parts):
+        return is_text_file(path)
+    return False
+
+
+def is_text_file(path: Path) -> bool:
+    try:
+        if path.stat().st_size > MAX_TEXT_FILE_SIZE:
+            return False
+        raw = path.read_bytes()
+    except OSError:
+        return False
+    if b"\x00" in raw:
+        return False
+    try:
+        raw.decode("utf-8")
+        return True
+    except UnicodeDecodeError:
+        try:
+            raw.decode("latin-1")
+            return True
+        except UnicodeDecodeError:
+            return False
+
+
+def read_text_file(path: Path) -> str:
+    raw = path.read_bytes()
+    for encoding in ("utf-8", "utf-8-sig", "latin-1"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return "[Unable to decode file content]"
+
+
+def set_code_style(document: Document) -> None:
+    styles = document.styles
+    if "CodeBlock" in styles:
+        return
+    style = styles.add_style("CodeBlock", 1)
+    style.base_style = styles["Normal"]
+    style.font.name = "Consolas"
+    style._element.rPr.rFonts.set(qn("w:eastAsia"), "Consolas")
+    style.font.size = Pt(8)
+
+
+def add_code_block(document: Document, text: str) -> None:
+    paragraph = document.add_paragraph(style="CodeBlock")
+    run = paragraph.add_run(text if text else "[Empty file]")
+    run.font.name = "Consolas"
+    run._element.rPr.rFonts.set(qn("w:eastAsia"), "Consolas")
+    run.font.size = Pt(8)
+
+
+def build_document() -> tuple[Path, int, int, int]:
+    document = Document()
+    section = document.sections[0]
+    section.orientation = WD_ORIENT.LANDSCAPE
+    section.page_width = Inches(11.69)
+    section.page_height = Inches(8.27)
+    section.left_margin = Inches(0.5)
+    section.right_margin = Inches(0.5)
+    section.top_margin = Inches(0.5)
+    section.bottom_margin = Inches(0.5)
+
+    set_code_style(document)
+
+    dirs, files = iter_dirs_and_files()
+    code_files = [path for path in files if looks_like_code_file(path)]
+    non_code_files = [path for path in files if path not in code_files]
+    extension_counts = Counter(path.suffix.lower() or "[no extension]" for path in files)
+
+    document.add_heading("Chipset Defect Vision Workspace Export", level=0)
+    document.add_paragraph(f"Root folder: {ROOT}")
+    document.add_paragraph(f"Total folders (excluding .git): {len(dirs)}")
+    document.add_paragraph(f"Total files (excluding .git): {len(files)}")
+    document.add_paragraph(f"Code/text files embedded: {len(code_files)}")
+    document.add_paragraph(f"Non-code files listed by name: {len(non_code_files)}")
+
+    document.add_heading("Extension Summary", level=1)
+    for extension, count in sorted(extension_counts.items()):
+        document.add_paragraph(f"{extension}: {count}", style="List Bullet")
+
+    document.add_heading("Folder Inventory", level=1)
+    for directory in dirs:
+        rel = "." if directory == ROOT else relative_posix(directory)
+        document.add_paragraph(rel, style="List Bullet")
+
+    document.add_heading("All File Names", level=1)
+    for file_path in files:
+        rel = relative_posix(file_path)
+        label = "[code]" if file_path in code_files else "[name only]"
+        document.add_paragraph(f"{label} {rel}", style="List Bullet")
+
+    document.add_page_break()
+    document.add_heading("Embedded Code And Text Files", level=1)
+    for index, file_path in enumerate(code_files, start=1):
+        rel = relative_posix(file_path)
+        document.add_heading(f"{index}. {rel}", level=2)
+        document.add_paragraph(f"Size: {file_path.stat().st_size} bytes")
+        add_code_block(document, read_text_file(file_path))
+        document.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
+
+    document.save(OUTPUT_PATH)
+    return OUTPUT_PATH, len(dirs), len(files), len(code_files)
+
+
+if __name__ == "__main__":
+    output_path, folder_count, file_count, code_count = build_document()
+    print(f"Created: {output_path}")
+    print(f"Folders: {folder_count}")
+    print(f"Files: {file_count}")
+    print(f"Embedded code/text files: {code_count}")
+
+
+--- FILE: scripts\export_repo_to_txt.py ---
+from __future__ import annotations
+
+from collections import Counter
+from pathlib import Path
+from typing import Iterable
+
+
+ROOT = Path(__file__).resolve().parents[1]
+OUTPUT_PATH = ROOT / "Chipset-Defect-Vision_full_workspace_export.txt"
+SKIP_DIRS = {".git"}
+CODE_DIR_HINTS = {
+    "app",
+    "frontend",
+    "scripts",
+    "training",
+}
+CODE_FILE_NAMES = {
+    "dockerfile",
+    "makefile",
+    "readme.md",
+    "requirements.txt",
+    ".gitignore",
+    ".dockerignore",
+    "data.yaml",
+    "classes.txt",
+}
+CODE_EXTENSIONS = {
+    ".bat",
+    ".c",
+    ".cc",
+    ".cfg",
+    ".conf",
+    ".css",
+    ".csv",
+    ".env",
+    ".go",
+    ".graphql",
+    ".h",
+    ".hpp",
+    ".html",
+    ".ini",
+    ".java",
+    ".js",
+    ".json",
+    ".jsx",
+    ".md",
+    ".mjs",
+    ".properties",
+    ".ps1",
+    ".py",
+    ".rb",
+    ".scss",
+    ".sh",
+    ".sql",
+    ".svg",
+    ".toml",
+    ".ts",
+    ".tsx",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
+IMAGE_EXTENSIONS = {
+    ".gif",
+    ".jpeg",
+    ".jpg",
+    ".png",
+    ".webp",
+}
+NON_CODE_EXTENSIONS = {
+    ".cache",
+    ".doc",
+    ".docx",
+    ".pdf",
+    ".pickle",
+    ".pth",
+    ".pt",
+    ".pyc",
+    ".zip",
+}
+NON_CODE_PATH_PARTS = {
+    "__pycache__",
+    "data/labels",
+    "data/images",
+    "incoming_data",
+    "raw_data",
+    "runs",
+    "training/data",
+    "weights",
+}
+MAX_TEXT_FILE_SIZE = 512 * 1024
+
+
+def relative_posix(path: Path) -> str:
+    return path.relative_to(ROOT).as_posix()
+
+
+def os_walk_sorted(root: Path) -> Iterable[tuple[str, list[str], list[str]]]:
+    import os
+
+    for current_root, dir_names, file_names in os.walk(root):
+        dir_names[:] = sorted(name for name in dir_names if name not in SKIP_DIRS)
+        file_names.sort()
+        yield current_root, dir_names, file_names
+
+
+def iter_dirs_and_files() -> tuple[list[Path], list[Path]]:
+    dirs: list[Path] = []
+    files: list[Path] = []
+    for current_root, dir_names, file_names in os_walk_sorted(ROOT):
+        current_path = Path(current_root)
+        dirs.append(current_path)
+        for file_name in file_names:
+            files.append(current_path / file_name)
+    return dirs, files
+
+
+def is_text_file(path: Path) -> bool:
+    try:
+        if path.stat().st_size > MAX_TEXT_FILE_SIZE:
+            return False
+        raw = path.read_bytes()
+    except OSError:
+        return False
+    if b"\x00" in raw:
+        return False
+    for encoding in ("utf-8", "utf-8-sig", "latin-1"):
+        try:
+            raw.decode(encoding)
+            return True
+        except UnicodeDecodeError:
+            continue
+    return False
+
+
+def looks_like_code_file(path: Path) -> bool:
+    rel = relative_posix(path)
+    lower_rel = rel.lower()
+    if path.name.lower() == OUTPUT_PATH.name.lower():
+        return False
+    if path.suffix.lower() in IMAGE_EXTENSIONS | NON_CODE_EXTENSIONS:
+        return False
+    if any(part in lower_rel for part in NON_CODE_PATH_PARTS):
+        return False
+    if path.name.lower() in CODE_FILE_NAMES:
+        return is_text_file(path)
+    if path.suffix.lower() in CODE_EXTENSIONS:
+        return is_text_file(path)
+    if any(part in CODE_DIR_HINTS for part in path.parts):
+        return is_text_file(path)
+    return False
+
+
+def read_text_file(path: Path) -> str:
+    raw = path.read_bytes()
+    for encoding in ("utf-8", "utf-8-sig", "latin-1"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return "[Unable to decode file content]"
+
+
+def build_export() -> tuple[Path, int, int, int, int]:
+    dirs, files = iter_dirs_and_files()
+    code_files = [path for path in files if looks_like_code_file(path)]
+    image_files = [path for path in files if path.suffix.lower() in IMAGE_EXTENSIONS]
+    other_files = [path for path in files if path not in code_files and path not in image_files]
+    extension_counts = Counter(path.suffix.lower() or "[no extension]" for path in files)
+
+    lines: list[str] = []
+    lines.append("Chipset Defect Vision Workspace Export")
+    lines.append("=" * 40)
+    lines.append(f"Root folder: {ROOT}")
+    lines.append(f"Total folders (excluding .git): {len(dirs)}")
+    lines.append(f"Total files (excluding .git): {len(files)}")
+    lines.append(f"Embedded code/text files: {len(code_files)}")
+    lines.append(f"Image files listed by name: {len(image_files)}")
+    lines.append(f"Other non-code files listed by name: {len(other_files)}")
+    lines.append("")
+    lines.append("Extension Summary")
+    lines.append("-" * 40)
+    for extension, count in sorted(extension_counts.items()):
+        lines.append(f"{extension}: {count}")
+    lines.append("")
+    lines.append("Folder Inventory")
+    lines.append("-" * 40)
+    for directory in dirs:
+        rel = "." if directory == ROOT else relative_posix(directory)
+        lines.append(rel)
+    lines.append("")
+    lines.append("Image File Names")
+    lines.append("-" * 40)
+    for file_path in image_files:
+        lines.append(relative_posix(file_path))
+    lines.append("")
+    lines.append("Other Non-Code File Names")
+    lines.append("-" * 40)
+    for file_path in other_files:
+        lines.append(relative_posix(file_path))
+    lines.append("")
+    lines.append("Embedded Code And Text Files")
+    lines.append("-" * 40)
+    for index, file_path in enumerate(code_files, start=1):
+        lines.append("")
+        lines.append(f"[{index}] {relative_posix(file_path)}")
+        lines.append(f"Size: {file_path.stat().st_size} bytes")
+        lines.append("-" * 40)
+        lines.append(read_text_file(file_path))
+        lines.append("")
+        lines.append("=" * 80)
+
+    OUTPUT_PATH.write_text("\n".join(lines), encoding="utf-8")
+    return OUTPUT_PATH, len(dirs), len(files), len(code_files), len(image_files)
+
+
+if __name__ == "__main__":
+    output_path, folder_count, file_count, code_count, image_count = build_export()
+    print(f"Created: {output_path}")
+    print(f"Folders: {folder_count}")
+    print(f"Files: {file_count}")
+    print(f"Embedded code/text files: {code_count}")
+    print(f"Image files listed by name: {image_count}")
+
+
+--- FILE: scripts\test_inference.py ---
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Send one or more images to the inference API and record latency.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--url",
+        default="http://127.0.0.1:8080/predict",
+        help="Predict endpoint URL.",
+    )
+    parser.add_argument(
+        "images",
+        nargs="+",
+        help="One or more image paths to test.",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=60,
+        help="Per-request timeout in seconds.",
+    )
+    return parser.parse_args()
+
+
+def post_base64_image(url: str, image_path: Path, timeout: int) -> tuple[float, dict]:
+    started_at = time.perf_counter()
+    image_base64 = base64.b64encode(image_path.read_bytes()).decode("utf-8")
+    payload = urllib.parse.urlencode({"image_base64": image_base64}).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        elapsed_ms = (time.perf_counter() - started_at) * 1000
+        body = json.loads(response.read().decode("utf-8"))
+        return elapsed_ms, body
+
+
+def main() -> int:
+    args = parse_args()
+    latencies: list[float] = []
+
+    print("=" * 72)
+    print("Inference performance check")
+    print(f"Endpoint : {args.url}")
+    print(f"Images   : {len(args.images)}")
+    print("=" * 72)
+
+    for raw_path in args.images:
+        image_path = Path(raw_path).expanduser().resolve()
+        if not image_path.exists():
+            print(f"[ERROR] Missing image: {image_path}")
+            return 1
+
+        try:
+            latency_ms, response = post_base64_image(args.url, image_path, args.timeout)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            print(f"[ERROR] {image_path.name}: HTTP {exc.code} {detail}")
+            return 1
+        except Exception as exc:  # pragma: no cover
+            print(f"[ERROR] {image_path.name}: {exc}")
+            return 1
+
+        latencies.append(latency_ms)
+        summary = response.get("summary", {})
+        print(
+            f"{image_path.name}: "
+            f"status={response.get('status')} "
+            f"defects={summary.get('defect_count', 0)} "
+            f"total={summary.get('total', 0)} "
+            f"latency_ms={latency_ms:.2f}"
+        )
+
+    average_ms = sum(latencies) / len(latencies)
+    print("-" * 72)
+    print(f"Average latency: {average_ms:.2f} ms")
+    print(f"Min latency    : {min(latencies):.2f} ms")
+    print(f"Max latency    : {max(latencies):.2f} ms")
+    print("=" * 72)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+

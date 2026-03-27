@@ -1,3 +1,26 @@
+"""
+training/train.py — YOLO training script for the PCB solder defect detector.
+
+Entry point for both local and Vertex AI training.  Accepts dataset paths
+as local directories or gs:// URIs (GCS data is downloaded to a temp dir
+transparently before training starts).
+
+Key responsibilities:
+  • load_hyperparameters()  — read training/hyperparameters.yaml
+  • stage_dataset()         — validate local dataset OR download from GCS
+  • stage_model()           — resolve base model (local file or auto-download)
+  • train_model()           — run YOLO training with CPU-safe device resolution
+  • copy_training_outputs() — copy best.pt → weights/best.pt
+  • validate_model()        — compute and log mAP50 on the val split
+  • export_model()          — optionally upload best.pt to GCS
+
+Usage (from project root):
+  python training/train.py                                 # all defaults
+  python training/train.py --force-cpu                     # debug on CPU
+  python training/train.py --data gs://bucket/data/        # GCS dataset
+  python training/train.py --output-model gs://bucket/m/   # upload result
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -8,6 +31,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+# ── sys.path fix — allow `from training.config import …` when run directly ───
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -15,12 +39,12 @@ if str(ROOT) not in sys.path:
 import yaml
 
 from training.config import (
-    DEFAULT_LOCAL_DATA_CONFIG,
-    DEFAULT_RUN_NAME,
+    DEFAULT_LOCAL_DATA_CONFIG,  # training/data.yaml
+    DEFAULT_RUN_NAME,           # pcb_solder_v1 (or TRAIN_RUN_NAME env var)
     PROJECT_ROOT,
-    RUNS_DIR,
-    TRAINING_DIR,
-    WEIGHTS_DIR,
+    RUNS_DIR,                   # runs/detect/<name>/
+    TRAINING_DIR,               # training/
+    WEIGHTS_DIR,                # weights/ — best.pt is copied here after training
 )
 from training.scripts.gcs_utils import (
     download_gcs_dir,
@@ -36,19 +60,24 @@ logging.getLogger("ultralytics").setLevel(logging.ERROR)
 
 log = logging.getLogger("training.train")
 
-HYPERPARAMETERS_YAML = TRAINING_DIR / "hyperparameters.yaml"
-DATA_YAML = TRAINING_DIR / "data.yaml"
+# ── Paths ─────────────────────────────────────────────────────────────────────
+HYPERPARAMETERS_YAML = TRAINING_DIR / "hyperparameters.yaml"  # loaded by load_hyperparameters()
+DATA_YAML            = TRAINING_DIR / "data.yaml"              # class names source of truth
 
-DATASET_SPLITS = ("train", "val")
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+# Expected dataset sub-directories; used by validate_dataset_yaml()
+DATASET_SPLITS    = ("train", "val")
+IMAGE_EXTENSIONS  = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
-# Map shorthand model names to Ultralytics model filenames
+# ── Model name resolution ─────────────────────────────────────────────────────
+# Maps the short human-readable names in hyperparameters.yaml to the filenames
+# that Ultralytics expects.  Bare Ultralytics names (e.g. "yolov8m.pt") are
+# also accepted and auto-downloaded on first use.
 _MODEL_MAP: dict[str, str] = {
-    "yolo-n": "yolov8n.pt",
-    "yolo-s": "yolov8s.pt",
-    "yolo-m": "yolov8m.pt",
-    "yolo-l": "yolov8l.pt",
-    "yolo-x": "yolov8x.pt",
+    "yolo-n": "yolov8n.pt",   # nano   — 3.2 M params
+    "yolo-s": "yolov8s.pt",   # small  — 11.2 M params (default)
+    "yolo-m": "yolov8m.pt",   # medium — 25.9 M params
+    "yolo-l": "yolov8l.pt",   # large  — 43.7 M params
+    "yolo-x": "yolov8x.pt",   # xlarge — 68.2 M params
 }
 
 
@@ -135,20 +164,32 @@ def parse_args() -> argparse.Namespace:
 
 
 def resolve_path(path_value: str) -> Path:
+    """Resolve a path string to an absolute Path.
+
+    Relative paths are resolved relative to PROJECT_ROOT, not the current
+    working directory, so the script behaves consistently regardless of
+    where it is invoked from.
+    """
     candidate = Path(path_value)
     return candidate if candidate.is_absolute() else PROJECT_ROOT / candidate
 
 
 def generate_data_yaml(dataset_root: Path, output_path: Path) -> Path:
+    """Write a YOLO data.yaml pointing at dataset_root.
+
+    Called when a dataset directory is provided instead of an explicit yaml
+    file (e.g. a GCS download that contains no data.yaml).  Class names are
+    always taken from training/data.yaml to stay in sync with the model.
+    """
     class_names = _get_class_names()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as handle:
         yaml.safe_dump(
             {
-                "path": str(dataset_root),
+                "path":  str(dataset_root),
                 "train": "images/train",
-                "val": "images/val",
-                "nc": len(class_names),
+                "val":   "images/val",
+                "nc":    len(class_names),
                 "names": class_names,
             },
             handle,
@@ -372,7 +413,15 @@ def train_model(
 
 
 def copy_training_outputs(run_dir: Path) -> Path:
-    weights_dir = run_dir / "weights"
+    """Copy best.pt (and optionally last.pt) from the YOLO run dir → weights/.
+
+    YOLO writes checkpoints to runs/detect/<name>/weights/.  We copy them to
+    the project-level weights/ directory so the inference server can always
+    find them at the stable path weights/best.pt regardless of run name.
+
+    Returns the Path of the copied best.pt.
+    """
+    weights_dir     = run_dir / "weights"
     best_checkpoint = weights_dir / "best.pt"
     last_checkpoint = weights_dir / "last.pt"
 
@@ -380,10 +429,10 @@ def copy_training_outputs(run_dir: Path) -> Path:
         raise RuntimeError(f"[Train] Training finished without best.pt in {weights_dir}")
 
     WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(best_checkpoint, WEIGHTS_DIR / "best.pt")
+    shutil.copy2(best_checkpoint, WEIGHTS_DIR / "best.pt")   # → weights/best.pt
 
     if last_checkpoint.exists():
-        shutil.copy2(last_checkpoint, WEIGHTS_DIR / "last.pt")
+        shutil.copy2(last_checkpoint, WEIGHTS_DIR / "last.pt")  # → weights/last.pt
 
     return WEIGHTS_DIR / "best.pt"
 

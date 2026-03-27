@@ -1,16 +1,48 @@
+# training/hyperparameters.yaml — YOLO training hyperparameters
+#
+# This file is the single source of truth for all training settings.
+# Consumed exclusively by training/train.py → load_hyperparameters().
+# The 'model' key is resolved by resolve_model_name() to an Ultralytics filename.
+#
+# To start a new training run just edit this file and run:
+#   python training/train.py
+#
+# Changes here DO NOT affect the running inference server (app/).
+# Deploy a new model by copying weights/best.pt after training completes.
+
+# ── Base model ────────────────────────────────────────────────────────────────
+# Shorthand resolved by _MODEL_MAP in train.py:
+#   yolo-n → yolov8n.pt   (nano   — fastest, lowest accuracy)
+#   yolo-s → yolov8s.pt   (small  — good balance for PCB tasks)
+#   yolo-m → yolov8m.pt   (medium — more capacity)
+#   yolo-l → yolov8l.pt   (large)
+#   yolo-x → yolov8x.pt   (xlarge — highest accuracy, slowest)
 model: yolo-s
-imgsz: 640
-batch: 16
-epochs: 100
-lr0: 0.01
-lrf: 0.001
-hsv_h: 0.015
-hsv_s: 0.7
-hsv_v: 0.4
-degrees: 10
-scale: 0.3
-flipud: 0.0
-fliplr: 0.5
-mosaic: 1.0
-copy_paste: 0.3
-patience: 30
+
+# ── Image & batch settings ────────────────────────────────────────────────────
+imgsz: 640    # Training image size in pixels (square); 640 is the YOLO standard
+batch: 16     # Images per gradient update; reduce if GPU OOM; -1 = Ultralytics auto
+
+# ── Training duration ─────────────────────────────────────────────────────────
+epochs:   100  # Maximum number of full passes over the dataset
+patience: 30   # Early-stopping: stop after this many epochs without val improvement
+
+# ── Learning rate schedule ────────────────────────────────────────────────────
+lr0: 0.01    # Initial learning rate (SGD base LR / AdamW initial LR)
+lrf: 0.001   # Final learning rate = lr0 * lrf (cosine annealing endpoint)
+
+# ── Colour-space augmentation ─────────────────────────────────────────────────
+# Helps the model generalise across different PCB lighting conditions.
+hsv_h: 0.015  # Hue shift range ± (fraction of 360°); keeps colours plausible
+hsv_s: 0.7    # Saturation multiplier range; simulates over/under-exposed images
+hsv_v: 0.4    # Value (brightness) multiplier range; simulates shadow/highlight
+
+# ── Geometric augmentation ────────────────────────────────────────────────────
+degrees: 10   # Random rotation ± degrees; PCBs are sometimes tilted on conveyors
+scale:   0.3  # Random scale factor ± (fraction); simulates distance variation
+flipud:  0.0  # Vertical flip probability (0.0 = disabled; PCBs have a fixed up)
+fliplr:  0.5  # Horizontal flip probability; PCBs are symmetric left/right
+
+# ── Advanced augmentation ─────────────────────────────────────────────────────
+mosaic:     1.0  # Mosaic augmentation probability (4 images combined); strong regulariser
+copy_paste: 0.3  # Copy-paste augmentation probability; good for small-defect classes
