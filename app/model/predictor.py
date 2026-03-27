@@ -7,8 +7,12 @@ import cv2
 import numpy as np
 import yaml
 
+import logging
+
 from app.config import CONFIDENCE_THRESHOLD, MODEL_NAME, MODEL_PATH
 from app.utils.image_utils import encode_image_to_base64
+
+logger = logging.getLogger("chipset_defect_vision.predictor")
 
 try:
     from ultralytics import YOLO
@@ -89,6 +93,13 @@ class SolderDefectPredictor:
         annotated = image_bgr.copy()
 
         if results.boxes is not None:
+            raw_scores = [round(float(b.conf[0]), 3) for b in results.boxes]
+            logger.debug(
+                "[predict] raw boxes=%d scores=%s (threshold=%.2f)",
+                len(results.boxes),
+                raw_scores,
+                self._confidence_threshold,
+            )
             for box in results.boxes:
                 x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
                 confidence = round(float(box.conf[0]), 4)
@@ -108,10 +119,19 @@ class SolderDefectPredictor:
 
         defect_count = len(detections)
         status = "DEFECT" if defect_count > 0 else "GOOD"
+        if defect_count == 0:
+            logger.info(
+                "[predict] no detections above threshold=%.2f — "
+                "try lowering INFERENCE_CONFIDENCE_THRESHOLD env var",
+                self._confidence_threshold,
+            )
+        else:
+            logger.info("[predict] %d detection(s) found: status=%s", defect_count, status)
         encoded_image = encode_image_to_base64(annotated)
 
         summary = {
             "total": defect_count,
+            "good_count": 0,          # Good class removed; always 0
             "defect_count": defect_count,
             "has_defects": defect_count > 0,
         }
@@ -121,6 +141,9 @@ class SolderDefectPredictor:
             "model": MODEL_NAME,
             "detections": detections,
             "summary": summary,
+            "total": defect_count,
+            "good_count": 0,
+            "defect_count": defect_count,
             "annotated_image_base64": encoded_image,
             "image": encoded_image,
         }

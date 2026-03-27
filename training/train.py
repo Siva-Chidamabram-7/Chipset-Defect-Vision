@@ -116,6 +116,12 @@ def parse_args() -> argparse.Namespace:
              "Auto-detected if omitted (GPU when available, CPU otherwise).",
     )
     parser.add_argument(
+        "--force-cpu",
+        action="store_true",
+        default=False,
+        help="Force training on CPU even if a GPU is available. Useful for debugging.",
+    )
+    parser.add_argument(
         "--name",
         default=_env_or_default("TRAIN_RUN_NAME", DEFAULT_RUN_NAME),
         help="Run name under runs/detect/.",
@@ -293,9 +299,12 @@ def train_model(
     if requested_device != "cpu":
         if not torch.cuda.is_available():
             log.warning(
-                "[Train] Device '%s' requested but CUDA is not available on this machine. "
-                "Falling back to cpu.  Pass --device cpu to silence this warning.",
+                "[Train] Device '%s' requested but CUDA is unavailable. Falling back to CPU.",
                 requested_device,
+            )
+            log.warning(
+                "To enable GPU training, install the CUDA build of PyTorch:\n"
+                "  pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121"
             )
             requested_device = "cpu"
         else:
@@ -311,18 +320,13 @@ def train_model(
     # surfaces in the traceback instead of being swallowed by a DataLoader
     # worker process.  2 workers are used on GPU where forking is safe.
     # Remove this block (or set a fixed value) once the dataset is clean.
-    train_kwargs["workers"] = 0 if requested_device == "cpu" else 2
+    train_kwargs["workers"] = 0 if requested_device == "cpu" else 8
     # ─────────────────────────────────────────────────────────────────────────
 
     log.info("Loading model      : %s", model_path)
     log.info("Dataset config     : %s", data_yaml_path)
     log.info("Device (resolved)  : %s", requested_device)
     log.info("Hyperparameters    : %s", train_kwargs)
-    log.warning(
-        "[Debug] workers=0 is active — multiprocessing is disabled to expose "
-        "the exact file that triggers the OpenCV crash. Run data_sanity_check.py "
-        "first, fix/remove bad files, then remove the workers=0 line."
-    )
 
     model = YOLO(str(model_path))
     _last_image: list[str] = []  # mutable container so the except block can read it
@@ -336,8 +340,8 @@ def train_model(
             name=run_name,
             project=str(RUNS_DIR / "detect"),
             save=True,
-            plots=False,
-            val=False,
+            plots=True,
+            val=True,
             verbose=False,
             **train_kwargs,  # device is already inside train_kwargs
         )
@@ -424,12 +428,15 @@ def main() -> int:
     setup_logging(level=getattr(logging, args.log_level.upper(), logging.INFO))
 
     # ── Device auto-detection ────────────────────────────────────────────────
-    if args.device:
+    if args.force_cpu:
+        device = "cpu"
+        device_source = "forced (--force-cpu flag)"
+    elif args.device:
         device = args.device
         device_source = "CLI / env"
     elif torch.cuda.is_available():
         device = "cuda"
-        device_source = "auto-detected"
+        device_source = "auto-detected GPU"
     else:
         device = "cpu"
         device_source = "auto-detected (no GPU found)"
@@ -458,6 +465,16 @@ def main() -> int:
         log.info("  GPU name     : %s", torch.cuda.get_device_name(0))
     log.info("=" * 60)
     # ─────────────────────────────────────────────────────────────────────────
+
+    if torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name(0)
+        gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        log.info("GPU detected: %s (%.1f GB VRAM)", gpu_name, gpu_mem)
+        log.info("CUDA version: %s", torch.version.cuda)
+    else:
+        log.warning("No CUDA GPU detected — training will run on CPU and be very slow.")
+        log.warning("If you have an NVIDIA GPU, check: nvidia-smi and ensure PyTorch CUDA build is installed.")
+        log.warning("Install command: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121")
 
     with tempfile.TemporaryDirectory(prefix="chipset-train-") as tmp_dir:
         workspace = Path(tmp_dir)

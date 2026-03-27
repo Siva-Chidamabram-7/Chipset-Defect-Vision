@@ -101,7 +101,7 @@ async function runLoader() {
 // ══════════════════════════════════════════════════════════════ HEALTH ═══════
 async function checkHealth() {
   try {
-    const res  = await fetch(`${API_BASE}/health`, { signal: AbortSignal.timeout(5000) });
+    const res  = await fetch(`${API_BASE}/health`, { signal: AbortSignal.timeout(10_000) });
     const data = await res.json();
     if (data.status === 'ok') {
       setStatus('online', 'System Online');
@@ -109,8 +109,8 @@ async function checkHealth() {
     } else {
       setStatus('offline', 'Degraded');
     }
-  } catch {
-    setStatus('offline', 'Offline');
+  } catch (e) {
+    setStatus('offline', `Offline — ${e.name}`);
   }
 }
 
@@ -299,7 +299,9 @@ async function runInference() {
     showProcessing(false);
     const msg = err.name === 'TimeoutError'
       ? 'Request timed out. Is the server running?'
-      : err.message;
+      : err.name === 'TypeError'
+        ? `Network error — is the server running? (${err.message})`
+        : err.message;
     toast(msg, 'error');
     previewBadge.textContent = 'Scan failed';
     previewBadge.style.color = 'var(--red)';
@@ -396,6 +398,10 @@ function computeQuality(good, defect, total) {
 // ══════════════════════════════════════════════════════════════ NEW SCAN ═════
 btnNewScan.addEventListener('click', () => {
   resultsCard.classList.add('hidden');
+  previewCard.classList.add('hidden');
+  currentFile    = null;
+  currentDataUrl = null;
+  fileInput.value = '';
   previewBadge.textContent = 'Ready to scan';
   previewBadge.style.color = '';
   inputCard.scrollIntoView({ behavior: 'smooth', block: 'start' });

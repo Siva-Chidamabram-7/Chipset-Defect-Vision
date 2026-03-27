@@ -1,8 +1,6 @@
-path: D:/Work/Chipset-Defect-Vision/data
-
+path: ../data
 train: images/train
 val: images/val
-
 nc: 6
 names:
   - missing_hole
