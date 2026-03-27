@@ -21,8 +21,9 @@ from app.config import (
 from app.model.predictor import SolderDefectPredictor
 from app.schemas import HealthResponse, PredictionResponse
 from app.utils.image_utils import decode_base64_image, decode_image_bytes, validate_image
+from app.utils.logger import setup_logger
 
-logger = logging.getLogger("chipset_defect_vision.api")
+logger = setup_logger().getChild("api")
 
 
 @asynccontextmanager
@@ -32,6 +33,10 @@ async def lifespan(application: FastAPI):
     logger.info("Inference service ready")
     logger.info("Model loaded: %s", application.state.predictor.is_ready())
     logger.info("Incoming directory: %s", INCOMING_DIR)
+    try:
+        logger.info("[STARTUP] Server started")
+    except Exception:
+        pass
     yield
     logger.info("Inference service stopping")
 
@@ -104,13 +109,47 @@ async def predict(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    try:
+        logger.info("[REQUEST] Incoming request received")
+        logger.info("[REQUEST] Image size: %d bytes", len(image_bytes))
+    except Exception:
+        pass
+
     _persist_incoming_image(image_bytes)
 
+    try:
+        _ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        logger.info("[REQUEST] Image saved to: %s/%s.jpg", INCOMING_DIR, _ts)
+    except Exception:
+        pass
+
     started_at = perf_counter()
-    prediction = predictor.predict(image_bgr)
+    try:
+        logger.info("[INFERENCE] Inference start")
+    except Exception:
+        pass
+
+    try:
+        prediction = predictor.predict(image_bgr)
+    except Exception as exc:
+        logger.exception("[predict] inference failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Inference error: {exc}") from exc
+
+    try:
+        logger.info("[INFERENCE] Inference end")
+        logger.info("[INFERENCE] Detections: %d", len(prediction.get("detections", [])))
+    except Exception:
+        pass
+
     prediction["timings"] = {
         "inference_ms": round((perf_counter() - started_at) * 1000, 2),
     }
+
+    try:
+        logger.info("[RESULT] Status: %s", prediction.get("status"))
+    except Exception:
+        pass
+
     return prediction
 
 

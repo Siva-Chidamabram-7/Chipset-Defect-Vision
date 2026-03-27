@@ -51,6 +51,7 @@ CLASS_MAP: dict[str, int] = {
     "Spur":            4,
     "Spurious_copper": 5,
     "Good":            6,
+    "Solder_Defect":   7,
 }
 
 IMAGE_EXTS: set[str] = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}

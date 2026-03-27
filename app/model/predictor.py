@@ -20,12 +20,14 @@ except ImportError:
 _DATA_YAML = Path(__file__).resolve().parents[2] / "training" / "data.yaml"
 
 _CLASS_COLORS = [
-    (68, 68, 239),    # missing_hole  — blue/purple
-    (8, 179, 234),    # mouse_bite    — cyan
-    (246, 130, 59),   # open_circuit  — orange
-    (247, 85, 168),   # short         — pink
-    (22, 115, 249),   # spur          — blue
-    (166, 184, 20),   # spurious_copper — yellow-green
+    (68, 68, 239),    # missing_hole     — blue/purple
+    (8, 179, 234),    # mouse_bite       — cyan
+    (246, 130, 59),   # open_circuit     — orange
+    (247, 85, 168),   # short            — pink
+    (22, 115, 249),   # spur             — blue
+    (166, 184, 20),   # spurious_copper  — yellow-green
+    (50, 205, 50),    # good             — green
+    (220, 50, 50),    # solder_defect    — red
 ]
 
 
@@ -112,6 +114,7 @@ class SolderDefectPredictor:
 
         summary = {
             "total": defect_count,
+            "good_count": 0,          # Good class removed; always 0
             "defect_count": defect_count,
             "has_defects": defect_count > 0,
         }
@@ -121,6 +124,9 @@ class SolderDefectPredictor:
             "model": MODEL_NAME,
             "detections": detections,
             "summary": summary,
+            "total": defect_count,
+            "good_count": 0,
+            "defect_count": defect_count,
             "annotated_image_base64": encoded_image,
             "image": encoded_image,
         }

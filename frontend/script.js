@@ -14,7 +14,7 @@ const HEALTH_INTERVAL = 30_000;   // ms between health-checks
 // Maps raw model class names to user-facing display names.
 // Does NOT affect API calls, model weights, or training data.
 const labelMap = {
-  Solder_defect: 'Solder Defect',
+  'Solder Defect': 'Solder Defect',
 };
 
 // ── DOM Refs ───────────────────────────────────────────────────────────────
@@ -276,18 +276,39 @@ async function runInference() {
     await sleep(600);
     animateStep('infer');
 
-    const res = await fetch(`${API_BASE}/predict`, {
-      method: 'POST',
-      body,
-      signal: AbortSignal.timeout(60_000),
-    });
+    console.log("[UI] File:", currentFile);
+    console.log("[UI] File size:", currentFile?.size);
+
+    let res;
+    try {
+      res = await fetch(`${API_BASE}/predict`, {
+        method: 'POST',
+        body,
+        signal: AbortSignal.timeout(60_000),
+      });
+    } catch (fetchErr) {
+      console.error("[UI FETCH ERROR]", fetchErr);
+      throw fetchErr;
+    }
+
+    console.log("[UI] Response status:", res.status);
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: res.statusText }));
       throw new Error(err.detail || 'Server error');
     }
 
-    const data = await res.json();
+    const text = await res.text();
+    console.log("[UI RAW RESPONSE]", text);
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (e) {
+      console.error("[UI] Invalid JSON response", text);
+      throw new Error("Invalid JSON response from server");
+    }
+    try { console.log("[UI] Response:", data); } catch(e) {}
+    try { console.log("[UI] Status:", data.status); } catch(e) {}
     await sleep(400);
     animateStep('post');
     await sleep(500);
