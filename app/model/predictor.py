@@ -47,6 +47,7 @@ _DATA_YAML = Path(__file__).resolve().parents[2] / "training" / "data.yaml"
 # BGR colour palette for bounding-box drawing — one entry per class index.
 # Colours are chosen for visual contrast on typical PCB images.
 _CLASS_COLORS = [
+<<<<<<< HEAD
     (68, 68, 239),    # 0 missing_hole        — blue/purple
     (8, 179, 234),    # 1 mouse_bite          — cyan
     (246, 130, 59),   # 2 open_circuit        — orange
@@ -57,6 +58,16 @@ _CLASS_COLORS = [
     (255, 191, 0),    # 7 excess_solder       — amber
     (204, 51, 51),    # 8 insufficient_solder — red
     (128, 128, 128),  # 9 good                — grey (currently unused by model)
+=======
+    (68, 68, 239),    # missing_hole     — blue/purple
+    (8, 179, 234),    # mouse_bite       — cyan
+    (246, 130, 59),   # open_circuit     — orange
+    (247, 85, 168),   # short            — pink
+    (22, 115, 249),   # spur             — blue
+    (166, 184, 20),   # spurious_copper  — yellow-green
+    (50, 205, 50),    # good             — green
+    (220, 50, 50),    # solder_defect    — red
+>>>>>>> b3b38bdc8568e3830d194c147d70e12a2d46a9e2
 ]
 
 
@@ -230,8 +241,13 @@ class SolderDefectPredictor:
 
         # Summary block mirrors PredictionSummary schema fields
         summary = {
+<<<<<<< HEAD
             "total":        defect_count,
             "good_count":   0,            # "good" class removed from model; always 0
+=======
+            "total": defect_count,
+            "good_count": 0,          # Good class removed; always 0
+>>>>>>> b3b38bdc8568e3830d194c147d70e12a2d46a9e2
             "defect_count": defect_count,
             "has_defects":  defect_count > 0,
         }
@@ -239,6 +255,7 @@ class SolderDefectPredictor:
         # Top-level keys are duplicated from summary for backward compatibility
         # with frontend versions that read them directly instead of from summary.
         return {
+<<<<<<< HEAD
             "status":                 status,
             "model":                  MODEL_NAME,
             "detections":             detections,
@@ -248,6 +265,17 @@ class SolderDefectPredictor:
             "defect_count":           defect_count,
             "annotated_image_base64": encoded_image,  # primary key used by frontend
             "image":                  encoded_image,  # legacy duplicate key
+=======
+            "status": status,
+            "model": MODEL_NAME,
+            "detections": detections,
+            "summary": summary,
+            "total": defect_count,
+            "good_count": 0,
+            "defect_count": defect_count,
+            "annotated_image_base64": encoded_image,
+            "image": encoded_image,
+>>>>>>> b3b38bdc8568e3830d194c147d70e12a2d46a9e2
         }
 
     @staticmethod

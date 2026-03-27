@@ -16,6 +16,7 @@
       "Bash(python -m py_compile \"D:\\\\Work\\\\Chipset-Defect-Vision\\\\training\\\\vertex_job.py\")",
       "Bash(python -m py_compile \"D:\\\\Work\\\\Chipset-Defect-Vision\\\\training\\\\config.py\")",
       "Bash(gh auth:*)",
+<<<<<<< HEAD
       "Bash(cmd //c \"dir D:\\\\Work\\\\Chipset-Defect-Vision\\\\output /b\")",
       "Bash(cut -d' ' -f1 \"D:/Work/Chipset-Defect-Vision/data/labels/train/\"*.txt)",
       "Bash(cut -d' ' -f1 \"D:/Work/Chipset-Defect-Vision/data/labels/val/\"*.txt)",
@@ -27,6 +28,9 @@
       "Bash(grep \"^6 \" *.txt)",
       "Bash(ls *.txt)",
       "Bash(ls Gemini*)"
+=======
+      "Bash(python -c \":*)"
+>>>>>>> b3b38bdc8568e3830d194c147d70e12a2d46a9e2
     ]
   }
 }
